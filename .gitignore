@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Xcode
+FnDictate.xcodeproj/project.xcworkspace/xcuserdata/
+FnDictate.xcodeproj/xcuserdata/
+
+# SwiftPM
+.swiftpm/
+Packages/
+Package.resolved
+
+# Secrets
+.env
+.env.*
