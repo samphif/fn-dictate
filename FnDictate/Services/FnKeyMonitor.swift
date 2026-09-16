@@ -1,24 +1,37 @@
 import AppKit
 import Carbon.HIToolbox
-import CoreGraphics
 import Foundation
 
-/// Monitors the Globe/Fn key (and Ctrl+Opt fallback) for push-to-talk.
+/// Monitors the Globe/Fn key (and Ctrl+Opt fallback) for:
+/// - Hold → push-to-talk
+/// - Double-tap → hands-free toggle
+/// - Single-tap → stop hands-free (when already listening)
+///
+/// Uses `NSEvent` global + local monitors (Accessibility) instead of a `CGEvent`
+/// tap. Input Monitoring + ad-hoc Xcode signing is brittle: every rebuild changes
+/// the CDHash and TCC treats the binary as a new app.
 final class FnKeyMonitor: @unchecked Sendable {
     enum Event {
         case holdBegan
         case holdEnded
         case cancel
+        case doubleTap
+        case singleTap
     }
 
     var onEvent: ((Event) -> Void)?
 
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
     private var fnDownAt: Date?
     private var ctrlOptDownAt: Date?
     private var activeHold: ActiveHold?
     private let holdThreshold: TimeInterval = 0.45
+    private let doubleTapWindow: TimeInterval = 0.35
+
+    private var tapCount = 0
+    private var firstTapAt: Date?
+    private var singleTapWorkItem: DispatchWorkItem?
 
     private enum ActiveHold {
         case fn
@@ -26,102 +39,85 @@ final class FnKeyMonitor: @unchecked Sendable {
     }
 
     func start() throws {
-        guard eventTap == nil else { return }
+        guard globalMonitor == nil, localMonitor == nil else { return }
 
-        let mask =
-            (1 << CGEventType.flagsChanged.rawValue)
-            | (1 << CGEventType.keyDown.rawValue)
-            | (1 << CGEventType.keyUp.rawValue)
+        let mask: NSEvent.EventTypeMask = [.flagsChanged, .keyDown]
 
-        let callback: CGEventTapCallBack = { _, type, event, userInfo in
-            guard let userInfo else { return Unmanaged.passUnretained(event) }
-            let monitor = Unmanaged<FnKeyMonitor>.fromOpaque(userInfo).takeUnretainedValue()
-            return monitor.handle(type: type, event: event)
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+            self?.handle(event)
+        }
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            self?.handle(event)
+            return event
         }
 
-        guard let tap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: CGEventMask(mask),
-            callback: callback,
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
-            throw MonitorError.tapCreateFailed
+        guard globalMonitor != nil, localMonitor != nil else {
+            stop()
+            throw MonitorError.monitorCreateFailed
         }
-
-        eventTap = tap
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
     }
 
     func stop() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
+        if let globalMonitor {
+            NSEvent.removeMonitor(globalMonitor)
         }
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        if let localMonitor {
+            NSEvent.removeMonitor(localMonitor)
         }
-        runLoopSource = nil
-        eventTap = nil
+        globalMonitor = nil
+        localMonitor = nil
+        resetTapState()
         fnDownAt = nil
         ctrlOptDownAt = nil
         activeHold = nil
     }
 
-    private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap = eventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
+    private func handle(_ event: NSEvent) {
+        if event.type == .keyDown {
+            if Int(event.keyCode) == kVK_Escape {
+                if activeHold != nil || tapCount > 0 {
+                    cancelHold()
+                    return
+                }
+                onEvent?(.cancel)
             }
-            return Unmanaged.passUnretained(event)
+            return
         }
 
-        if type == .keyDown, event.getIntegerValueField(.keyboardEventKeycode) == kVK_Escape {
-            if activeHold != nil {
-                cancelHold()
-                return nil
-            }
-            return Unmanaged.passUnretained(event)
+        guard event.type == .flagsChanged else { return }
+
+        let keyCode = Int(event.keyCode)
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        if keyCode == kVK_Function {
+            let isDown = flags.contains(.function)
+            handleFn(isDown: isDown)
+            return
         }
 
-        guard type == .flagsChanged else {
-            return Unmanaged.passUnretained(event)
-        }
+        let ctrlOptDown = flags.contains(.control) && flags.contains(.option)
+            && !flags.contains(.command) && !flags.contains(.shift)
 
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let flags = event.flags
-
-        if keyCode == Int64(kVK_Function) {
-            let isDown = flags.contains(.maskSecondaryFn)
-            return handleFn(isDown: isDown, event: event)
-        }
-
-        let ctrlOptDown = flags.contains(.maskControl) && flags.contains(.maskAlternate)
-            && !flags.contains(.maskCommand) && !flags.contains(.maskShift)
-
-        if keyCode == Int64(kVK_Control) || keyCode == Int64(kVK_RightControl)
-            || keyCode == Int64(kVK_Option) || keyCode == Int64(kVK_RightOption)
+        if keyCode == kVK_Control || keyCode == kVK_RightControl
+            || keyCode == kVK_Option || keyCode == kVK_RightOption
         {
-            return handleCtrlOpt(isDown: ctrlOptDown, event: event)
+            handleCtrlOpt(isDown: ctrlOptDown)
         }
-
-        return Unmanaged.passUnretained(event)
     }
 
-    private func handleFn(isDown: Bool, event: CGEvent) -> Unmanaged<CGEvent>? {
+    private func handleFn(isDown: Bool) {
         if isDown {
-            guard activeHold == nil else { return nil }
+            guard activeHold == nil else { return }
             fnDownAt = Date()
             DispatchQueue.main.asyncAfter(deadline: .now() + holdThreshold) { [weak self] in
                 guard let self, let started = self.fnDownAt, self.activeHold == nil else { return }
                 if Date().timeIntervalSince(started) >= self.holdThreshold - 0.01 {
+                    self.resetTapState()
                     self.activeHold = .fn
                     self.onEvent?(.holdBegan)
                 }
             }
-            return nil
+            return
         }
 
         let started = fnDownAt
@@ -129,30 +125,27 @@ final class FnKeyMonitor: @unchecked Sendable {
         if activeHold == .fn {
             activeHold = nil
             onEvent?(.holdEnded)
-            return nil
+            return
         }
 
         if let started, Date().timeIntervalSince(started) < holdThreshold {
-            // Short tap — let system keep Fn for function-key remaps; we already swallowed down.
-            return Unmanaged.passUnretained(event)
+            registerTap()
         }
-        return Unmanaged.passUnretained(event)
     }
 
-    private func handleCtrlOpt(isDown: Bool, event: CGEvent) -> Unmanaged<CGEvent>? {
+    private func handleCtrlOpt(isDown: Bool) {
         if isDown {
-            guard activeHold == nil, ctrlOptDownAt == nil else {
-                return Unmanaged.passUnretained(event)
-            }
+            guard activeHold == nil, ctrlOptDownAt == nil else { return }
             ctrlOptDownAt = Date()
             DispatchQueue.main.asyncAfter(deadline: .now() + holdThreshold) { [weak self] in
                 guard let self, let started = self.ctrlOptDownAt, self.activeHold == nil else { return }
                 if Date().timeIntervalSince(started) >= self.holdThreshold - 0.01 {
+                    self.resetTapState()
                     self.activeHold = .ctrlOpt
                     self.onEvent?(.holdBegan)
                 }
             }
-            return Unmanaged.passUnretained(event)
+            return
         }
 
         let started = ctrlOptDownAt
@@ -160,14 +153,49 @@ final class FnKeyMonitor: @unchecked Sendable {
         if activeHold == .ctrlOpt {
             activeHold = nil
             onEvent?(.holdEnded)
-            return nil
+            return
         }
 
-        _ = started
-        return Unmanaged.passUnretained(event)
+        if let started, Date().timeIntervalSince(started) < holdThreshold {
+            registerTap()
+        }
+    }
+
+    private func registerTap() {
+        let now = Date()
+        if let firstTapAt, now.timeIntervalSince(firstTapAt) <= doubleTapWindow {
+            tapCount += 1
+        } else {
+            tapCount = 1
+            firstTapAt = now
+        }
+
+        singleTapWorkItem?.cancel()
+
+        if tapCount >= 2 {
+            resetTapState()
+            onEvent?(.doubleTap)
+            return
+        }
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.tapCount == 1 else { return }
+            self.resetTapState()
+            self.onEvent?(.singleTap)
+        }
+        singleTapWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + doubleTapWindow, execute: work)
+    }
+
+    private func resetTapState() {
+        singleTapWorkItem?.cancel()
+        singleTapWorkItem = nil
+        tapCount = 0
+        firstTapAt = nil
     }
 
     private func cancelHold() {
+        resetTapState()
         fnDownAt = nil
         ctrlOptDownAt = nil
         activeHold = nil
@@ -175,6 +203,6 @@ final class FnKeyMonitor: @unchecked Sendable {
     }
 
     enum MonitorError: Error {
-        case tapCreateFailed
+        case monitorCreateFailed
     }
 }

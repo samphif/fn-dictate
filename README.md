@@ -7,7 +7,7 @@ Local-first macOS dictation and meeting notes — a Wispr Flow–style **hold Fn
 - Apple Silicon Mac
 - macOS 26+
 - Xcode 26+
-- Microphone + Accessibility (Input Monitoring recommended; Screen Recording for system audio in meetings)
+- Microphone + Accessibility (Screen Recording for system audio in meetings)
 
 ## Build & run
 
@@ -33,7 +33,7 @@ open build/Build/Products/Debug/FnDictate.app
 |---|---|
 | Dictate (push-to-talk) | Hold **Fn** (or **Ctrl+Opt**) |
 | Cancel dictation | **Esc** while holding |
-| Start / stop meeting | Menu bar → Start/Stop meeting |
+| Start / stop meeting | **⌥M** (Option+M), or menu bar |
 
 - Short Fn taps (&lt; ~0.45s) do **not** start dictation (so Fn+function keys still work).
 - Cursor / code editors get light cleanup; Edge / browsers get fuller polish.
@@ -43,8 +43,7 @@ open build/Build/Products/Debug/FnDictate.app
 
 1. Allow **Microphone**
 2. Enable **Accessibility** for Fn Dictate
-3. Enable **Input Monitoring** if the Fn key does nothing
-4. For meeting system audio: enable **Screen Recording**
+3. For meeting system audio: enable **Screen Recording**
 
 See [SETUP.md](SETUP.md) for Wispr / BetterTouchTool / system Dictation conflict steps.
 

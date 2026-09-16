@@ -9,8 +9,8 @@ import Observation
 final class PermissionManager {
     var microphoneGranted = false
     var accessibilityTrusted = false
-    var inputMonitoringTrusted = false
 
+    /// Mic + Accessibility are enough (Fn via NSEvent; paste via synthetic ⌘V).
     var allRequiredGranted: Bool {
         microphoneGranted && accessibilityTrusted
     }
@@ -24,7 +24,6 @@ final class PermissionManager {
         }
 
         accessibilityTrusted = AXIsProcessTrusted()
-        inputMonitoringTrusted = CGPreflightListenEventAccess()
     }
 
     func requestMicrophone() async {
@@ -38,20 +37,12 @@ final class PermissionManager {
         accessibilityTrusted = AXIsProcessTrustedWithOptions(options)
     }
 
-    func promptInputMonitoring() {
-        inputMonitoringTrusted = CGRequestListenEventAccess()
-    }
-
     func openAccessibilitySettings() {
         openURL("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
     }
 
     func openMicrophoneSettings() {
         openURL("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
-    }
-
-    func openInputMonitoringSettings() {
-        openURL("x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
     }
 
     func openScreenRecordingSettings() {

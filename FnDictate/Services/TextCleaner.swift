@@ -5,10 +5,24 @@ import Foundation
 import FoundationModels
 #endif
 
-enum CleanupTone: Sendable {
+enum CleanupTone: String, Sendable, CaseIterable {
     case raw
     case light
     case polished
+
+    var displayName: String {
+        switch self {
+        case .raw: return "Raw"
+        case .light: return "Light"
+        case .polished: return "Polished"
+        }
+    }
+
+    var next: CleanupTone {
+        let all = Self.allCases
+        guard let index = all.firstIndex(of: self) else { return .light }
+        return all[(index + 1) % all.count]
+    }
 
     static func forApp(bundleID: String?, name: String?) -> CleanupTone {
         let haystack = "\(bundleID ?? "") \(name ?? "")".lowercased()

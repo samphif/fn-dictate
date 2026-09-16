@@ -21,14 +21,20 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
 	<key>LSUIElement</key>
-	<true/>
+	<false/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>CFBundleDisplayName</key>
+	<string>Fn Dictate</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Fn Dictate records your voice for on-device transcription and meeting notes.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Fn Dictate uses on-device speech recognition to turn your voice into text.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Fn Dictate pastes transcribed text into the app you are using.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Fn Dictate reads your calendar to name speakers, title meetings, and prepare pre-meeting briefs. Events stay on your Mac.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Fn Dictate reads your calendar to name speakers, title meetings, and prepare pre-meeting briefs. Events stay on your Mac.</string>
 </dict>
 </plist>

@@ -17,11 +17,18 @@ actor SpeechTranscriptionService {
 
     private(set) var partialTranscript = ""
     private var finalizedSegments: [String] = []
+    private var sessionStartedAt: ContinuousClock.Instant?
 
     private var onPartialUpdate: (@Sendable (String) -> Void)?
+    /// Fired when a segment is finalized: (text, seconds from session start).
+    private var onFinalSegment: (@Sendable (String, TimeInterval) -> Void)?
 
     func setPartialHandler(_ handler: (@Sendable (String) -> Void)?) {
         onPartialUpdate = handler
+    }
+
+    func setFinalSegmentHandler(_ handler: (@Sendable (String, TimeInterval) -> Void)?) {
+        onFinalSegment = handler
     }
 
     func prewarm() async throws {
@@ -38,9 +45,10 @@ actor SpeechTranscriptionService {
         self.analyzer = analyzer
     }
 
-    func startSession() async throws {
+    func startSession(contextualStrings: [String] = []) async throws {
         partialTranscript = ""
         finalizedSegments = []
+        sessionStartedAt = ContinuousClock.now
 
         let locale = await preferredLocale()
         let module = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
@@ -52,7 +60,16 @@ actor SpeechTranscriptionService {
         )
         inputContinuation = continuation
 
+        let context = AnalysisContext()
+        let hints = Array(contextualStrings.prefix(100))
+        if !hints.isEmpty {
+            context.contextualStrings[.general] = hints
+        }
+
         let analyzer = SpeechAnalyzer(modules: [module])
+        if !hints.isEmpty {
+            try await analyzer.setContext(context)
+        }
         let format: AVAudioFormat?
         if let preparedFormat {
             format = preparedFormat
@@ -145,6 +162,7 @@ actor SpeechTranscriptionService {
         if isFinal {
             finalizedSegments.append(text)
             partialTranscript = ""
+            onFinalSegment?(text, elapsedSinceStart())
         } else {
             partialTranscript = text
         }
@@ -154,6 +172,13 @@ actor SpeechTranscriptionService {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
         onPartialUpdate?(combined)
+    }
+
+    private func elapsedSinceStart() -> TimeInterval {
+        guard let started = sessionStartedAt else { return 0 }
+        let duration = ContinuousClock.now - started
+        return Double(duration.components.seconds)
+            + Double(duration.components.attoseconds) / 1e18
     }
 
     private func preferredLocale() async -> Locale {

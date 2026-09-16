@@ -29,6 +29,20 @@ final class MeetingStore {
     func updateTranscript(id: UUID, transcript: String) {
         guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
         notes[index].transcript = transcript
+        // Live partials shouldn't thrash disk / agent export every frame.
+    }
+
+    func appendSegment(id: UUID, segment: MeetingTranscriptSegment) {
+        guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[index].segments.append(segment)
+        notes[index].transcript = notes[index].labeledTranscript
+        save(exportAgent: false)
+    }
+
+    func updateCatchUp(id: UUID, text: String) {
+        guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[index].catchUp = text
+        save(exportAgent: false)
     }
 
     func delete(_ note: MeetingNote) {
@@ -39,10 +53,14 @@ final class MeetingStore {
     private func load() {
         guard let data = try? Data(contentsOf: url) else { return }
         notes = (try? JSONDecoder().decode([MeetingNote].self, from: data)) ?? []
+        MeetingAgentExport.refresh(notes: notes)
     }
 
-    private func save() {
+    private func save(exportAgent: Bool = true) {
         guard let data = try? JSONEncoder().encode(notes) else { return }
         try? data.write(to: url, options: .atomic)
+        if exportAgent {
+            MeetingAgentExport.refresh(notes: notes)
+        }
     }
 }
