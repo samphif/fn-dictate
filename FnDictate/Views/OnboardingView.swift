@@ -37,13 +37,30 @@ struct OnboardingView: View {
                     action: { model.permissions.promptAccessibility() },
                     settings: { model.permissions.openAccessibilitySettings() }
                 )
+
+                permissionRow(
+                    title: "Screen Recording",
+                    detail: "Optional — captures Zoom/Meet/Teams audio so other speakers aren’t labeled only as You",
+                    systemImage: "rectangle.dashed.badge.record",
+                    granted: model.permissions.screenRecordingGranted,
+                    actionTitle: "Allow",
+                    action: {
+                        Task {
+                            let ok = await model.permissions.requestScreenRecording()
+                            if !ok {
+                                model.permissions.openScreenRecordingSettings()
+                            }
+                        }
+                    },
+                    settings: { model.permissions.openScreenRecordingSettings() }
+                )
             }
             .padding(.bottom, 24)
 
             conflictTips
                 .padding(.bottom, 20)
 
-            Text("After enabling a permission in Settings, return here — or quit Fn Dictate and relaunch if a checkmark doesn’t appear. Choose Not now to skip this screen on future launches; reopen anytime from the menu.")
+            Text("After enabling a permission in Settings, fully quit Fn Dictate and relaunch (⌘Q, then Run again). Screen Recording and Accessibility often don’t apply until relaunch. Choose Not now to skip this screen on future launches; reopen anytime from the menu.")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

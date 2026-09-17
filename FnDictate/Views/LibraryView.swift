@@ -94,6 +94,9 @@ struct LibraryView: View {
     @State private var selectedMeetingID: MeetingNote.ID?
     @State private var draftText = ""
     @State private var learnFromEdits = true
+    @State private var formattedPreview = ""
+    @State private var formattedPreviewBusy = false
+    @State private var formattedPreviewGeneration = 0
     @State private var newIncorrect = ""
     @State private var newCorrect = ""
     @State private var editIncorrect = ""
@@ -116,6 +119,7 @@ struct LibraryView: View {
         case dictations
         case dictionary
         case meetings
+        case formatting
 
         var id: String { rawValue }
 
@@ -124,6 +128,7 @@ struct LibraryView: View {
             case .dictations: return "mic"
             case .dictionary: return "textformat"
             case .meetings: return "doc.text"
+            case .formatting: return "slider.horizontal.3"
             }
         }
 
@@ -132,6 +137,7 @@ struct LibraryView: View {
             case .dictations: return "Dictations"
             case .dictionary: return "Dictionary"
             case .meetings: return "Meetings"
+            case .formatting: return "Formatting"
             }
         }
     }
@@ -292,6 +298,8 @@ struct LibraryView: View {
             dictionaryPane
         case .meetings:
             meetingsPane
+        case .formatting:
+            formattingPane
         }
     }
 
@@ -582,6 +590,8 @@ struct LibraryView: View {
         withAnimation(.easeInOut(duration: 0.22)) {
             selectedDictationID = entry.id
             draftText = entry.text
+            formattedPreview = ""
+            formattedPreviewBusy = false
         }
     }
 
@@ -735,6 +745,17 @@ struct LibraryView: View {
                             .stroke(FlowTheme.hairline, lineWidth: 1)
                     )
             }
+            .onChange(of: draftText) { _, _ in
+                scheduleFormattedPreview(for: entry)
+            }
+            .onChange(of: model.toneSettingsVersion) { _, _ in
+                scheduleFormattedPreview(for: entry)
+            }
+            .onAppear {
+                scheduleFormattedPreview(for: entry)
+            }
+
+            formattedPreviewSection(for: entry)
 
             // Further edits on an already-revised entry — learn from current → draft only.
             if !corrections.isEmpty, entry.isRevised {
@@ -771,6 +792,76 @@ struct LibraryView: View {
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func formattedPreviewSection(for entry: TranscriptEntry) -> some View {
+        let tone = model.effectiveTone(bundleID: entry.appBundleID, name: entry.appName)
+        let appLabel = entry.appName.map { AppDisplayName.short(name: $0, bundleID: entry.appBundleID) } ?? "this app"
+
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text("Formatted")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(FlowTheme.muted)
+                    .tracking(0.4)
+                Text("·")
+                    .font(.system(size: 11))
+                    .foregroundStyle(FlowTheme.muted.opacity(0.6))
+                Text("\(tone.displayName) for \(appLabel)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(FlowTheme.muted)
+                    .lineLimit(1)
+                if formattedPreviewBusy {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .padding(.leading, 2)
+                }
+            }
+
+            if tone == .raw {
+                Text("Paste stays near-raw for this app. Change the level in Formatting to preview Light or Polished cleanup.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(FlowTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text(formattedPreview.isEmpty ? draftText : formattedPreview)
+                .font(.system(size: 13))
+                .foregroundStyle(FlowTheme.ink.opacity(tone == .raw ? 0.7 : 1))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(10)
+                .frame(minHeight: 72, maxHeight: 160, alignment: .topLeading)
+                .background(FlowTheme.card.opacity(0.7), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(FlowTheme.hairline, lineWidth: 1)
+                )
+                .textSelection(.enabled)
+        }
+    }
+
+    private func scheduleFormattedPreview(for entry: TranscriptEntry) {
+        formattedPreviewGeneration += 1
+        let generation = formattedPreviewGeneration
+        let source = draftText
+        let tone = model.effectiveTone(bundleID: entry.appBundleID, name: entry.appName)
+
+        if tone == .raw {
+            formattedPreviewBusy = false
+            formattedPreview = TextCleaner.basicCleanup(source)
+            return
+        }
+
+        formattedPreviewBusy = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            guard generation == formattedPreviewGeneration else { return }
+            let cleaned = await model.cleanedText(source, tone: tone)
+            guard generation == formattedPreviewGeneration else { return }
+            formattedPreview = cleaned
+            formattedPreviewBusy = false
+        }
     }
 
     private func revisionDiffSection(
@@ -892,6 +983,144 @@ struct LibraryView: View {
             }
         }
         flash(banner)
+    }
+
+    // MARK: - Formatting
+
+    private var formattingPane: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 18) {
+                Text("Formatting")
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(FlowTheme.ink)
+                    .padding(.top, 8)
+
+                Text("How much cleanup runs before paste into each app. Raw keeps wording nearly as spoken; Light fixes punctuation; Polished rewrites into clear prose.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(FlowTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                VStack(spacing: 0) {
+                    ForEach(Array(model.formattingProfiles.enumerated()), id: \.element.id) { index, profile in
+                        formattingProfileRow(profile)
+                        if index < model.formattingProfiles.count - 1 {
+                            Divider()
+                                .overlay(FlowTheme.hairline)
+                                .padding(.leading, 52)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+                .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            }
+            .padding(.horizontal, 28)
+            .padding(.vertical, 24)
+            .frame(maxWidth: 720, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func formattingProfileRow(_ profile: FormattingProfile) -> some View {
+        HStack(spacing: 12) {
+            formattingAppIcon(profile)
+                .frame(width: 28, height: 28)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(profile.name)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(FlowTheme.ink)
+                    if profile.isOverride {
+                        Text("Custom")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(FlowTheme.ink.opacity(0.7))
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(FlowTheme.accentSoft, in: Capsule())
+                    }
+                    if profile.isCatchAll {
+                        Text("Default")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(FlowTheme.muted)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(FlowTheme.card, in: Capsule())
+                    }
+                }
+                if let bundleID = profile.bundleID {
+                    Text(bundleID)
+                        .font(.system(size: 11))
+                        .foregroundStyle(FlowTheme.muted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } else {
+                    Text("Apps without a specific rule")
+                        .font(.system(size: 11))
+                        .foregroundStyle(FlowTheme.muted)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            if profile.canEdit, let bundleID = profile.bundleID {
+                Picker("Tone", selection: toneBinding(for: bundleID, name: profile.name)) {
+                    ForEach(CleanupTone.allCases, id: \.self) { tone in
+                        Text(tone.displayName).tag(tone)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 260)
+
+                if profile.isOverride {
+                    Button("Reset") {
+                        model.resetTone(forBundleID: bundleID)
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(FlowTheme.muted)
+                }
+            } else {
+                Text(profile.tone.displayName)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(FlowTheme.muted)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(FlowTheme.card, in: Capsule())
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    private func toneBinding(for bundleID: String, name: String) -> Binding<CleanupTone> {
+        Binding(
+            get: { model.effectiveTone(bundleID: bundleID, name: name) },
+            set: { model.setTone($0, forBundleID: bundleID) }
+        )
+    }
+
+    @ViewBuilder
+    private func formattingAppIcon(_ profile: FormattingProfile) -> some View {
+        if profile.isCatchAll {
+            Image(systemName: "app.dashed")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(FlowTheme.muted)
+                .frame(width: 28, height: 28)
+                .background(FlowTheme.card, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        } else if let icon = AppIconCache.icon(bundleID: profile.bundleID, appName: profile.name) {
+            Image(nsImage: icon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 28, height: 28)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        } else {
+            Image(systemName: "app")
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(FlowTheme.muted)
+                .frame(width: 28, height: 28)
+                .background(FlowTheme.card, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
     }
 
     // MARK: - Dictionary
@@ -1334,6 +1563,14 @@ struct LibraryView: View {
                         .toggleStyle(.button)
                         .buttonStyle(.borderless)
                         .help("Capture Zoom/Meet/Teams audio. Requires Screen Recording.")
+
+                        Toggle(isOn: $model.autoStopRecordingWhenMeetingEnds) {
+                            Image(systemName: model.autoStopRecordingWhenMeetingEnds
+                                  ? "stop.circle.fill" : "stop.circle")
+                        }
+                        .toggleStyle(.button)
+                        .buttonStyle(.borderless)
+                        .help("Auto-stop recording when the Zoom/Teams/Meet call ends.")
                     }
                     .padding(.top, 8)
 
@@ -1638,7 +1875,16 @@ struct LibraryView: View {
                     .foregroundStyle(FlowTheme.muted)
                     .lineLimit(1)
 
-                if let actionPreview {
+                if note.processingState == .processing {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.mini)
+                        Text(note.processingMessage ?? "Processing notes…")
+                            .font(.system(size: 12))
+                            .foregroundStyle(FlowTheme.muted)
+                            .lineLimit(1)
+                    }
+                } else if let actionPreview {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Image(systemName: "checklist")
                             .font(.system(size: 10, weight: .semibold))
@@ -1724,7 +1970,7 @@ struct LibraryView: View {
         if let id = selectedMeetingID,
            let note = model.meetings.notes.first(where: { $0.id == id })
         {
-            MeetingPreviewCard(note: note, reminders: model.reminders)
+            MeetingPreviewCard(noteID: note.id, model: model)
                 .frame(width: 320)
         } else {
             VStack(spacing: 10) {
@@ -1986,12 +2232,17 @@ private struct DictationRowView: View {
 // MARK: - Meeting preview / detail
 
 private struct MeetingPreviewCard: View {
-    let note: MeetingNote
-    var reminders: RemindersService
+    let noteID: MeetingNote.ID
+    @Bindable var model: AppModel
     @State private var showFull = false
     @State private var showRemindersExport = false
 
+    private var note: MeetingNote? {
+        model.meetings.notes.first(where: { $0.id == noteID })
+    }
+
     private var metaLine: String {
+        guard let note else { return "" }
         var parts: [String] = []
         if Calendar.current.isDateInToday(note.createdAt) {
             parts.append("Today · \(note.createdAt.formatted(date: .omitted, time: .shortened).lowercased())")
@@ -2007,10 +2258,21 @@ private struct MeetingPreviewCard: View {
         return parts.joined(separator: " · ")
     }
 
-    /// Decisions double as “key points” in the list/preview UI.
-    private var keyPoints: [String] { note.decisions }
-
     var body: some View {
+        Group {
+            if let note {
+                previewBody(note)
+            } else {
+                Text("Note unavailable")
+                    .foregroundStyle(FlowTheme.muted)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func previewBody(_ note: MeetingNote) -> some View {
+        let keyPoints = note.decisions
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -2028,6 +2290,10 @@ private struct MeetingPreviewCard: View {
                             .font(.system(size: 12))
                             .foregroundStyle(FlowTheme.muted)
                             .lineLimit(3)
+                    }
+
+                    MeetingProcessingBanner(note: note) {
+                        model.reprocessMeeting(id: note.id)
                     }
 
                     HStack(spacing: 8) {
@@ -2103,7 +2369,7 @@ private struct MeetingPreviewCard: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Overview")
                             .font(.system(size: 13, weight: .semibold))
-                        Text(note.summary.isEmpty ? "No summary yet." : note.summary)
+                        Text(overviewText(for: note))
                             .font(.system(size: 13))
                             .foregroundStyle(FlowTheme.ink.opacity(0.85))
                             .lineLimit(note.actionItems.isEmpty && keyPoints.isEmpty ? 12 : 6)
@@ -2117,12 +2383,22 @@ private struct MeetingPreviewCard: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .sheet(isPresented: $showFull) {
-            MeetingDetailView(note: note, reminders: reminders)
+            MeetingDetailView(noteID: noteID, model: model)
                 .frame(minWidth: 640, minHeight: 520)
         }
         .sheet(isPresented: $showRemindersExport) {
-            SendActionItemsToRemindersSheet(note: note, reminders: reminders)
+            SendActionItemsToRemindersSheet(note: note, reminders: model.reminders)
         }
+    }
+
+    private func overviewText(for note: MeetingNote) -> String {
+        if note.processingState == .processing {
+            return note.processingMessage ?? "Generating overview…"
+        }
+        if note.summary.isEmpty {
+            return "No summary yet."
+        }
+        return note.summary
     }
 
     private func previewBulletSection(
@@ -2178,13 +2454,122 @@ private struct MeetingPreviewCard: View {
     }
 }
 
-struct MeetingDetailView: View {
+private struct MeetingProcessingBanner: View {
     let note: MeetingNote
-    var reminders: RemindersService
+    var onReprocess: (() -> Void)?
+
+    var body: some View {
+        switch note.processingState {
+        case .processing:
+            HStack(spacing: 10) {
+                ProgressView()
+                    .controlSize(.small)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Processing notes…")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(note.processingMessage ?? "Summary and action items usually finish within a minute for long meetings.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(FlowTheme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .background(FlowTheme.accentSoft.opacity(0.65), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+        case .incomplete:
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Summary incomplete")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(note.processingMessage ?? "Apple Intelligence couldn't fully process this meeting.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(FlowTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let onReprocess {
+                    Button("Retry processing") {
+                        onReprocess()
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .buttonStyle(.bordered)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+        case .complete:
+            if let message = note.processingMessage, !message.isEmpty {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.system(size: 12))
+                    Text(message)
+                        .font(.system(size: 11))
+                        .foregroundStyle(FlowTheme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(FlowTheme.card.opacity(0.7), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            } else {
+                EmptyView()
+            }
+
+        case .idle:
+            // Legacy notes with empty structured fields — offer retry.
+            if note.endedAt != nil,
+               note.actionItems.isEmpty,
+               note.decisions.isEmpty,
+               note.wordCount > 200
+            {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Notes may need processing")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("This long transcript doesn’t have action items yet. Run Apple Intelligence to generate an overview.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(FlowTheme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let onReprocess {
+                        Button("Generate summary & actions") {
+                            onReprocess()
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                        .buttonStyle(.bordered)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(FlowTheme.accentSoft.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            } else {
+                EmptyView()
+            }
+        }
+    }
+}
+
+struct MeetingDetailView: View {
+    let noteID: MeetingNote.ID
+    @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var showRemindersExport = false
 
+    private var note: MeetingNote? {
+        model.meetings.notes.first(where: { $0.id == noteID })
+    }
+
     var body: some View {
+        Group {
+            if let note {
+                detailBody(note)
+            } else {
+                Text("Note unavailable")
+                    .padding()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func detailBody(_ note: MeetingNote) -> some View {
         VStack(spacing: 0) {
             HStack {
                 Spacer()
@@ -2219,11 +2604,20 @@ struct MeetingDetailView: View {
                         }
                     }
 
+                    MeetingProcessingBanner(note: note) {
+                        model.reprocessMeeting(id: note.id)
+                    }
+
                     if let brief = note.brief, !brief.isEmpty {
                         section("Pre-meeting brief", brief)
                     }
 
-                    section("Overview", note.summary.isEmpty ? "No summary yet." : note.summary)
+                    section(
+                        "Overview",
+                        note.processingState == .processing
+                            ? (note.processingMessage ?? "Generating overview…")
+                            : (note.summary.isEmpty ? "No summary yet." : note.summary)
+                    )
 
                     if !note.actionItems.isEmpty {
                         bulletSection("Action items", note.actionItems)
@@ -2267,10 +2661,15 @@ struct MeetingDetailView: View {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(note.markdownExport, forType: .string)
                 }
-                Button("Export…") { exportMarkdown() }
+                Button("Export…") { exportMarkdown(note) }
                 if !note.actionItems.isEmpty {
                     Button("Send to Reminders…") {
                         showRemindersExport = true
+                    }
+                }
+                if note.processingState != .processing {
+                    Button("Reprocess") {
+                        model.reprocessMeeting(id: note.id)
                     }
                 }
                 Spacer()
@@ -2283,7 +2682,7 @@ struct MeetingDetailView: View {
         }
         .background(FlowTheme.cream)
         .sheet(isPresented: $showRemindersExport) {
-            SendActionItemsToRemindersSheet(note: note, reminders: reminders)
+            SendActionItemsToRemindersSheet(note: note, reminders: model.reminders)
         }
     }
 
@@ -2300,16 +2699,19 @@ struct MeetingDetailView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.title3.weight(.semibold))
-            ForEach(items, id: \.self) { item in
-                Text("• \(item)")
-                    .textSelection(.enabled)
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                HStack(alignment: .top, spacing: 8) {
+                    Text("•")
+                    Text(item)
+                        .textSelection(.enabled)
+                }
             }
         }
     }
 
-    private func exportMarkdown() {
+    private func exportMarkdown(_ note: MeetingNote) {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.plainText, .text]
+        panel.allowedContentTypes = [.text]
         panel.nameFieldStringValue = "\(note.title).md"
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }

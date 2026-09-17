@@ -31,9 +31,21 @@ final class AppModel {
     var highlightedMeetingID: UUID?
     var lastError: String?
     var includeSystemAudioInMeetings = true
+    /// When on, stop meeting recording once the detected Zoom/Teams/Meet call disappears.
+    var autoStopRecordingWhenMeetingEnds: Bool = true {
+        didSet {
+            UserDefaults.standard.set(autoStopRecordingWhenMeetingEnds, forKey: autoStopMeetingKey)
+        }
+    }
     var activeMeetingID: UUID?
     var detectedMeeting: DetectedMeeting?
     var showMeetingPrompt = false
+    /// Manual expand of the Wispr-style edge rail (collapsed by default).
+    var flowSidebarExpanded = false
+    /// Meeting prompt tucked into the rail (Not now still snoozes fully).
+    var meetingPromptMinimized = false
+    /// Listening/meeting transcript pill tucked down to a waveform chip.
+    var listeningPillCollapsed = false
     /// Live catch-up answer shown during / after a meeting.
     var meetingCatchUp: String?
     /// Answer from ask-across-history.
@@ -44,6 +56,8 @@ final class AppModel {
     var upcomingBrief: String?
     /// Effective cleanup tone for the current / last frontmost app (shown on the pill).
     var currentTone: CleanupTone = .light
+    /// Bumps when per-app tone overrides change (Edit preview / Formatting list refresh).
+    var toneSettingsVersion = 0
 
     /// True when dictation was started via double-tap (stays on until tap/Esc).
     private var handsFreeDictation = false
@@ -54,6 +68,7 @@ final class AppModel {
     private let didMineHistoryKey = "FnDictate.didMineHistoryForDictionary"
     private let setupCompletedKey = "FnDictate.setupCompleted"
     private let learnFromInAppKey = "FnDictate.learnFromInAppCorrections"
+    private let autoStopMeetingKey = "FnDictate.autoStopRecordingWhenMeetingEnds"
 
     let permissions = PermissionManager()
     let history = HistoryStore()
@@ -95,6 +110,12 @@ final class AppModel {
     private var lastCatchUpOffset: TimeInterval = 0
     private var activeMeetingPartialYou = ""
     private var activeMeetingPartialOthers = ""
+    /// Set when ScreenCaptureKit fails at meeting start.
+    private var activeMeetingSystemAudioFailed = false
+    /// App name (Zoom / Teams / …) this recording is bound to for auto-stop; nil = manual note.
+    private var recordingMeetingAppName: String?
+    /// In-flight note refinement tasks (stop + manual retry).
+    private var meetingRefineTasks: [UUID: Task<Void, Never>] = [:]
 
     private var hasCompletedSetup: Bool {
         get { UserDefaults.standard.bool(forKey: setupCompletedKey) }
@@ -150,6 +171,11 @@ final class AppModel {
         } else {
             learnFromInAppCorrections = UserDefaults.standard.bool(forKey: learnFromInAppKey)
         }
+        if UserDefaults.standard.object(forKey: autoStopMeetingKey) == nil {
+            autoStopRecordingWhenMeetingEnds = true
+        } else {
+            autoStopRecordingWhenMeetingEnds = UserDefaults.standard.bool(forKey: autoStopMeetingKey)
+        }
         permissions.refresh()
         calendar.refreshStatus()
         refreshUpcomingCalendar()
@@ -182,6 +208,7 @@ final class AppModel {
 
         startHotkeysIfPossible()
         startMeetingDetection()
+        presentFlowSidebar()
         refreshCurrentTone()
     }
 
@@ -190,18 +217,13 @@ final class AppModel {
         let (bundleID, _) = TextPaster.frontmostApp()
         let next = currentTone.next
         if let bundleID, !bundleID.isEmpty {
-            toneOverrides[bundleID] = next.rawValue
-            saveToneOverrides()
+            setTone(next, forBundleID: bundleID)
+        } else {
+            currentTone = next
         }
-        currentTone = next
     }
 
-    private func refreshCurrentTone() {
-        let (bundleID, name) = TextPaster.frontmostApp()
-        currentTone = effectiveTone(bundleID: bundleID, name: name)
-    }
-
-    private func effectiveTone(bundleID: String?, name: String?) -> CleanupTone {
+    func effectiveTone(bundleID: String?, name: String?) -> CleanupTone {
         if let bundleID,
            let raw = toneOverrides[bundleID],
            let override = CleanupTone(rawValue: raw)
@@ -209,6 +231,113 @@ final class AppModel {
             return override
         }
         return CleanupTone.forApp(bundleID: bundleID, name: name)
+    }
+
+    func setTone(_ tone: CleanupTone, forBundleID bundleID: String) {
+        guard !bundleID.isEmpty else { return }
+        toneOverrides[bundleID] = tone.rawValue
+        saveToneOverrides()
+        toneSettingsVersion += 1
+        let (frontID, _) = TextPaster.frontmostApp()
+        if frontID == bundleID {
+            currentTone = tone
+        }
+    }
+
+    func resetTone(forBundleID bundleID: String) {
+        guard !bundleID.isEmpty else { return }
+        toneOverrides.removeValue(forKey: bundleID)
+        saveToneOverrides()
+        toneSettingsVersion += 1
+        let (frontID, frontName) = TextPaster.frontmostApp()
+        if frontID == bundleID {
+            currentTone = effectiveTone(bundleID: frontID, name: frontName)
+        }
+    }
+
+    func hasToneOverride(forBundleID bundleID: String) -> Bool {
+        toneOverrides[bundleID] != nil
+    }
+
+    /// Runs the same cleanup used at paste time (for Edit Formatted preview).
+    func cleanedText(_ text: String, tone: CleanupTone) async -> String {
+        await cleaner.clean(text, tone: tone)
+    }
+
+    /// Curated defaults + history apps + orphan overrides for Library → Formatting.
+    var formattingProfiles: [FormattingProfile] {
+        var seen = Set<String>()
+        var profiles: [FormattingProfile] = []
+
+        for app in FormattingDefaults.curatedApps {
+            seen.insert(app.bundleID)
+            let tone = effectiveTone(bundleID: app.bundleID, name: app.name)
+            profiles.append(
+                FormattingProfile(
+                    id: app.bundleID,
+                    name: app.name,
+                    bundleID: app.bundleID,
+                    tone: tone,
+                    isOverride: hasToneOverride(forBundleID: app.bundleID),
+                    isCatchAll: false
+                )
+            )
+        }
+
+        // History apps not already curated (newest first, unique by bundle ID).
+        for entry in history.entries {
+            guard let bundleID = entry.appBundleID, !bundleID.isEmpty, !seen.contains(bundleID) else {
+                continue
+            }
+            seen.insert(bundleID)
+            let trimmedName = entry.appName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let display = trimmedName.isEmpty
+                ? AppDisplayName.short(name: entry.appName, bundleID: bundleID)
+                : trimmedName
+            profiles.append(
+                FormattingProfile(
+                    id: bundleID,
+                    name: display,
+                    bundleID: bundleID,
+                    tone: effectiveTone(bundleID: bundleID, name: entry.appName),
+                    isOverride: hasToneOverride(forBundleID: bundleID),
+                    isCatchAll: false
+                )
+            )
+        }
+
+        for bundleID in toneOverrides.keys.sorted() where !seen.contains(bundleID) {
+            seen.insert(bundleID)
+            let name = AppDisplayName.short(name: nil, bundleID: bundleID)
+            profiles.append(
+                FormattingProfile(
+                    id: bundleID,
+                    name: name,
+                    bundleID: bundleID,
+                    tone: effectiveTone(bundleID: bundleID, name: nil),
+                    isOverride: true,
+                    isCatchAll: false
+                )
+            )
+        }
+
+        profiles.append(
+            FormattingProfile(
+                id: FormattingDefaults.catchAllID,
+                name: "Other apps",
+                bundleID: nil,
+                tone: .light,
+                isOverride: false,
+                isCatchAll: true
+            )
+        )
+
+        return profiles
+    }
+
+    private func refreshCurrentTone() {
+        let (bundleID, name) = TextPaster.frontmostApp()
+        currentTone = effectiveTone(bundleID: bundleID, name: name)
     }
 
     private func loadToneOverrides() {
@@ -237,9 +366,9 @@ final class AppModel {
                 self?.handleMeetingDetected(meeting)
             }
         }
-        meetingDetector.onMeetingEnded = { [weak self] in
+        meetingDetector.onMeetingEnded = { [weak self] ended in
             Task { @MainActor in
-                self?.handleMeetingDetectionEnded()
+                self?.handleMeetingDetectionEnded(ended)
             }
         }
         meetingDetector.start()
@@ -250,28 +379,69 @@ final class AppModel {
         // Don't interrupt active work with the prompt.
         guard phase == .idle else { return }
         showMeetingPrompt = true
-        showMeetingPromptPanel(true)
+        meetingPromptMinimized = false
+        flowSidebarExpanded = false
+        updateFlowSidebarPanel()
     }
 
-    private func handleMeetingDetectionEnded() {
+    private func handleMeetingDetectionEnded(_ ended: DetectedMeeting) {
         detectedMeeting = nil
         if showMeetingPrompt {
             showMeetingPrompt = false
-            showMeetingPromptPanel(false)
+            meetingPromptMinimized = false
+            updateFlowSidebarPanel()
         }
+
+        guard autoStopRecordingWhenMeetingEnds,
+              phase == .meetingRecording,
+              let boundApp = recordingMeetingAppName,
+              boundApp.caseInsensitiveCompare(ended.appName) == .orderedSame
+        else { return }
+
+        // Clear binding first so a flaky second end signal can't double-stop.
+        recordingMeetingAppName = nil
+        statusMessage = "Meeting ended — saving…"
+        Task { await stopMeeting() }
     }
 
     func dismissMeetingPrompt() {
         meetingDetector.dismissCurrent()
         showMeetingPrompt = false
-        showMeetingPromptPanel(false)
+        meetingPromptMinimized = false
+        flowSidebarExpanded = false
+        updateFlowSidebarPanel()
     }
 
     func acceptDetectedMeeting() {
         includeSystemAudioInMeetings = true
         showMeetingPrompt = false
-        showMeetingPromptPanel(false)
+        meetingPromptMinimized = false
+        flowSidebarExpanded = false
+        updateFlowSidebarPanel()
         toggleMeeting()
+    }
+
+    func toggleFlowSidebar() {
+        if showMeetingPrompt, meetingPromptMinimized {
+            meetingPromptMinimized = false
+        } else if showMeetingPrompt {
+            meetingPromptMinimized = true
+        } else {
+            flowSidebarExpanded.toggle()
+        }
+        updateFlowSidebarPanel()
+    }
+
+    func collapseFlowSidebar() {
+        if showMeetingPrompt {
+            meetingPromptMinimized = true
+        }
+        flowSidebarExpanded = false
+        updateFlowSidebarPanel()
+    }
+
+    func presentFlowSidebar() {
+        updateFlowSidebarPanel()
     }
 
     func startHotkeysIfPossible() {
@@ -582,6 +752,7 @@ final class AppModel {
         lastCatchUpOffset = 0
         activeMeetingPartialYou = ""
         activeMeetingPartialOthers = ""
+        activeMeetingSystemAudioFailed = false
         meetingStartedAt = .now
 
         refreshUpcomingCalendar()
@@ -596,14 +767,17 @@ final class AppModel {
             attendees: attendees,
             calendarEventIdentifier: cal?.eventIdentifier,
             calendarTitle: cal?.title,
-            brief: upcomingBrief
+            brief: upcomingBrief,
+            processingState: .idle
         )
         meetings.upsert(note)
         activeMeetingID = note.id
+        // Bind auto-stop to the call we started with (not a later unrelated app).
+        recordingMeetingAppName = detectedMeeting?.appName
         selectedMeetingFocus(note.id)
 
         phase = .meetingRecording
-        statusMessage = "Recording meeting…"
+        statusMessage = recordingMeetingAppName.map { "Recording \($0)…" } ?? "Recording meeting…"
         partialText = ""
         showListeningPill(true)
         requestedLibraryTab = .meetings
@@ -638,8 +812,15 @@ final class AppModel {
             try mic.start()
 
             if includeSystemAudioInMeetings {
-                let remote = speechRemote ?? speech
-                if remote !== speech {
+                permissions.refresh()
+                if !permissions.screenRecordingGranted {
+                    _ = await permissions.requestScreenRecording()
+                }
+
+                if permissions.screenRecordingGranted,
+                   let remote = speechRemote,
+                   remote !== speech
+                {
                     await remote.setPartialHandler { [weak self] text in
                         Task { @MainActor in
                             self?.activeMeetingPartialOthers = text
@@ -652,19 +833,30 @@ final class AppModel {
                         }
                     }
                     try await remote.startSession(contextualStrings: hints)
-                }
 
-                let capture = SystemAudioCapture()
-                capture.onBuffer = { buffer in
-                    let packet = SendablePCMBuffer(buffer: buffer)
-                    Task { await remote.append(packet) }
-                }
-                do {
-                    try await capture.start()
-                    systemAudio = capture
-                } catch {
-                    lastError = "System audio unavailable (\(error.localizedDescription)). Continuing with microphone only."
-                    permissions.openScreenRecordingSettings()
+                    let capture = SystemAudioCapture()
+                    capture.onBuffer = { buffer in
+                        let packet = SendablePCMBuffer(buffer: buffer)
+                        Task { await remote.append(packet) }
+                    }
+                    do {
+                        try await capture.start()
+                        systemAudio = capture
+                    } catch {
+                        activeMeetingSystemAudioFailed = true
+                        lastError = "System audio unavailable (\(error.localizedDescription)). Continuing with microphone only — other speakers may appear as You. If you just granted Screen Recording, quit Fn Dictate completely and relaunch."
+                        permissions.openScreenRecordingSettings()
+                        markActiveMeetingSystemAudioFailed()
+                    }
+                } else {
+                    activeMeetingSystemAudioFailed = true
+                    if !permissions.screenRecordingGranted {
+                        lastError = "Screen Recording is required to capture other participants. Enable Fn Dictate in System Settings → Privacy & Security → Screen & System Audio Recording, then fully quit and relaunch the app."
+                        permissions.openScreenRecordingSettings()
+                    } else {
+                        lastError = "System audio transcription isn't available. Continuing with microphone only."
+                    }
+                    markActiveMeetingSystemAudioFailed()
                 }
             }
         } catch {
@@ -674,8 +866,11 @@ final class AppModel {
     }
 
     private func stopMeeting() async {
+        guard phase == .meetingRecording else { return }
         phase = .meetingProcessing
-        statusMessage = "Re-reading meeting…"
+        statusMessage = statusMessage.hasPrefix("Meeting ended")
+            ? statusMessage
+            : "Saving meeting…"
         mic.stop()
         audioLevel = 0
         let capture = systemAudio
@@ -705,7 +900,127 @@ final class AppModel {
         }
 
         var note = meetings.notes.first(where: { $0.id == id }) ?? MeetingNote(id: id)
-        // Ensure any leftover finals that didn't fire as segments still land in transcript.
+        note.systemAudioCaptureFailed = note.systemAudioCaptureFailed || activeMeetingSystemAudioFailed
+        mergeLeftoverMeetingText(into: &note, youText: youText, othersText: othersText)
+
+        let rawLabeled = note.labeledTranscript.isEmpty
+            ? [youText, othersText].filter { !$0.isEmpty }.joined(separator: "\n")
+            : note.labeledTranscript
+        let withDictionary = dictionary.apply(to: rawLabeled)
+
+        note.endedAt = .now
+        note.transcript = withDictionary
+        note.processingState = .processing
+        note.processingMessage = "Generating summary, action items, and speakers…"
+        meetings.upsert(note)
+
+        activeMeetingID = nil
+        meetingStartedAt = nil
+        recordingMeetingAppName = nil
+        activeMeetingSystemAudioFailed = false
+        highlightedMeetingID = note.id
+        requestedLibraryTab = .meetings
+        showLibrary = true
+        presentLibraryWindow()
+        phase = .idle
+        statusMessage = "Processing meeting notes…"
+        partialText = ""
+        activeMeetingPartialYou = ""
+        activeMeetingPartialOthers = ""
+
+        enqueueMeetingRefine(noteID: note.id)
+    }
+
+    /// Re-run Apple Intelligence on an existing note (e.g. after a long meeting fallback).
+    func reprocessMeeting(id: UUID) {
+        guard let note = meetings.notes.first(where: { $0.id == id }) else { return }
+        guard note.processingState != .processing else { return }
+        var updating = note
+        updating.processingState = .processing
+        updating.processingMessage = "Generating summary, action items, and speakers…"
+        meetings.upsert(updating)
+        if phase == .idle {
+            statusMessage = "Processing meeting notes…"
+        }
+        enqueueMeetingRefine(noteID: id)
+    }
+
+    private func enqueueMeetingRefine(noteID: UUID) {
+        meetingRefineTasks[noteID]?.cancel()
+        meetingRefineTasks[noteID] = Task { @MainActor [weak self] in
+            await self?.refineMeetingNote(id: noteID)
+            self?.meetingRefineTasks[noteID] = nil
+        }
+    }
+
+    private func refineMeetingNote(id: UUID) async {
+        guard var note = meetings.notes.first(where: { $0.id == id }) else { return }
+        let result = await meetingIntelligence.refine(
+            transcript: note.labeledTranscript.isEmpty ? note.transcript : note.labeledTranscript,
+            segments: note.segments,
+            attendees: note.attendees,
+            calendarTitle: note.calendarTitle,
+            dictionaryHints: Array(dictionary.preferredSpellings.prefix(40))
+        )
+        guard !Task.isCancelled else { return }
+        guard meetings.notes.contains(where: { $0.id == id }) else { return }
+
+        let refined = result.meeting
+        if !refined.title.isEmpty {
+            note.title = refined.title
+        }
+        note.transcript = dictionary.apply(
+            to: refined.transcript.isEmpty ? note.transcript : refined.transcript
+        )
+        note.summary = refined.summary
+        note.decisions = refined.decisions
+        note.actionItems = refined.actionItems
+        note.openQuestions = refined.openQuestions
+        if !refined.segments.isEmpty {
+            note.segments = refined.segments
+        }
+
+        var message = result.message
+        let speakers = Set(note.segments.map(\.speaker))
+        if note.includeSystemAudio,
+           (note.systemAudioCaptureFailed || (!speakers.contains("Others") && speakers == ["You"]))
+        {
+            let speakerHint = note.systemAudioCaptureFailed
+                ? "System audio wasn't captured — only your mic is labeled. Enable Screen Recording and retry, or connect Calendar so names can be inferred."
+                : "No separate “Others” audio was captured (headphones/system audio). Connect Calendar so speaker names can be inferred from context."
+            if message == nil || result.usedAppleIntelligence {
+                message = speakerHint
+            }
+        }
+
+        note.processingState = result.usedAppleIntelligence ? .complete : .incomplete
+        note.processingMessage = message
+        meetings.upsert(note)
+
+        if phase == .idle {
+            statusMessage = result.usedAppleIntelligence
+                ? "Meeting notes ready"
+                : "Meeting saved — summary limited"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                guard self?.phase == .idle else { return }
+                self?.statusMessage = self?.idleStatus ?? "Hold Fn · double-tap hands-free"
+            }
+        }
+    }
+
+    private func markActiveMeetingSystemAudioFailed() {
+        guard let id = activeMeetingID,
+              var note = meetings.notes.first(where: { $0.id == id })
+        else { return }
+        note.systemAudioCaptureFailed = true
+        meetings.upsert(note)
+    }
+
+    private func mergeLeftoverMeetingText(
+        into note: inout MeetingNote,
+        youText: String,
+        othersText: String
+    ) {
         if note.segments.isEmpty {
             var segs: [MeetingTranscriptSegment] = []
             if !youText.isEmpty {
@@ -715,49 +1030,27 @@ final class AppModel {
                 segs.append(MeetingTranscriptSegment(startOffset: 0.1, text: othersText, speaker: "Others"))
             }
             note.segments = segs
+            return
         }
 
-        let rawLabeled = note.labeledTranscript.isEmpty
-            ? [youText, othersText].filter { !$0.isEmpty }.joined(separator: "\n")
-            : note.labeledTranscript
-        let withDictionary = dictionary.apply(to: rawLabeled)
-
-        let refined = await meetingIntelligence.refine(
-            transcript: withDictionary,
-            segments: note.segments,
-            attendees: note.attendees,
-            calendarTitle: note.calendarTitle,
-            dictionaryHints: Array(dictionary.preferredSpellings.prefix(40))
-        )
-
-        note.title = refined.title.isEmpty ? note.title : refined.title
-        note.endedAt = .now
-        note.transcript = refined.transcript.isEmpty ? withDictionary : refined.transcript
-        note.summary = refined.summary
-        note.decisions = refined.decisions
-        note.actionItems = refined.actionItems
-        note.openQuestions = refined.openQuestions
-        if !refined.segments.isEmpty {
-            note.segments = refined.segments
+        // If the Others channel never emitted segments, fold finish() text in.
+        if !othersText.isEmpty {
+            let othersJoined = note.segments
+                .filter { $0.speaker != "You" }
+                .map(\.text)
+                .joined(separator: " ")
+            if othersJoined.isEmpty {
+                let lastOffset = note.segments.map(\.startOffset).max() ?? 0
+                note.segments.append(
+                    MeetingTranscriptSegment(
+                        startOffset: lastOffset + 0.1,
+                        text: dictionary.apply(to: othersText),
+                        speaker: "Others"
+                    )
+                )
+            }
         }
-        note.transcript = dictionary.apply(to: note.transcript)
-
-        meetings.upsert(note)
-        activeMeetingID = nil
-        meetingStartedAt = nil
-        highlightedMeetingID = note.id
-        requestedLibraryTab = .meetings
-        showLibrary = true
-        presentLibraryWindow()
-        phase = .idle
-        statusMessage = "Meeting saved"
-        partialText = ""
-        activeMeetingPartialYou = ""
-        activeMeetingPartialOthers = ""
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard self?.phase == .idle else { return }
-            self?.statusMessage = "Hold Fn · double-tap hands-free"
-        }
+        _ = youText
     }
 
     private func cancelMeetingRecording() async {
@@ -789,6 +1082,8 @@ final class AppModel {
         }
         activeMeetingID = nil
         meetingStartedAt = nil
+        recordingMeetingAppName = nil
+        activeMeetingSystemAudioFailed = false
         phase = .idle
         statusMessage = idleStatus
         partialText = ""
@@ -912,71 +1207,144 @@ final class AppModel {
         return Array((spellings + incorrects + recent).uniqued().prefix(80))
     }
 
+    func toggleListeningPillCollapsed() {
+        listeningPillCollapsed.toggle()
+        updateListeningPillPanel()
+    }
+
+    func collapseListeningPill() {
+        guard !listeningPillCollapsed else { return }
+        listeningPillCollapsed = true
+        updateListeningPillPanel()
+    }
+
+    func expandListeningPill() {
+        guard listeningPillCollapsed else { return }
+        listeningPillCollapsed = false
+        updateListeningPillPanel()
+    }
+
+    func listeningPillOrigin() -> CGPoint {
+        listeningPill?.frame.origin ?? .zero
+    }
+
+    func moveListeningPill(to origin: CGPoint) {
+        listeningPill?.setFrameOrigin(origin)
+    }
+
+    func flowSidebarOrigin() -> CGPoint {
+        meetingPromptPanel?.frame.origin ?? .zero
+    }
+
+    func moveFlowSidebar(to origin: CGPoint) {
+        meetingPromptPanel?.setFrameOrigin(origin)
+    }
+
     // MARK: - Pill UI
 
     private func showListeningPill(_ visible: Bool) {
         if visible {
-            if listeningPill == nil {
-                let panel = NSPanel(
-                    contentRect: NSRect(x: 0, y: 0, width: 400, height: 68),
-                    styleMask: [.borderless, .nonactivatingPanel],
-                    backing: .buffered,
-                    defer: false
-                )
-                panel.isFloatingPanel = true
-                panel.level = .floating
-                panel.backgroundColor = .clear
-                panel.hasShadow = true
-                panel.isOpaque = false
-                panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-                panel.contentViewController = NSHostingController(rootView: ListeningPillView(model: self))
-                listeningPill = panel
-            } else if let host = listeningPill?.contentViewController as? NSHostingController<ListeningPillView> {
-                host.rootView = ListeningPillView(model: self)
+            // Fresh session starts expanded so live transcript is visible.
+            if listeningPill?.isVisible != true {
+                listeningPillCollapsed = false
             }
-            let pillHeight: CGFloat = 68
-            listeningPill?.setContentSize(NSSize(width: 400, height: pillHeight))
-            if let screen = NSScreen.main {
-                let frame = screen.visibleFrame
-                let size = listeningPill?.frame.size ?? CGSize(width: 400, height: pillHeight)
-                listeningPill?.setFrameOrigin(
-                    NSPoint(x: frame.midX - size.width / 2, y: frame.minY + 28)
-                )
-            }
+            updateListeningPillPanel()
             listeningPill?.orderFrontRegardless()
         } else {
+            listeningPillCollapsed = false
             listeningPill?.orderOut(nil)
         }
     }
 
-    private func showMeetingPromptPanel(_ visible: Bool) {
-        if visible {
-            if meetingPromptPanel == nil {
-                let panel = NSPanel(
-                    contentRect: NSRect(x: 0, y: 0, width: 332, height: 180),
-                    styleMask: [.borderless, .nonactivatingPanel],
-                    backing: .buffered,
-                    defer: false
-                )
-                panel.isFloatingPanel = true
-                panel.level = .statusBar
-                panel.backgroundColor = .clear
-                panel.hasShadow = true
-                panel.isOpaque = false
-                panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-                panel.contentViewController = NSHostingController(rootView: MeetingPromptView(model: self))
-                meetingPromptPanel = panel
-            }
+    private func updateListeningPillPanel() {
+        let collapsed = listeningPillCollapsed
+        // Includes SwiftUI padding so the shape shadow isn't clipped.
+        let size = collapsed
+            ? CGSize(width: 92, height: 80)
+            : CGSize(width: 420, height: 92)
+
+        if listeningPill == nil {
+            let panel = makeFloatingPanel(size: size, level: .floating)
+            panel.contentViewController = ClearHostingController(rootView: ListeningPillView(model: self))
+            listeningPill = panel
+
             if let screen = NSScreen.main {
                 let frame = screen.visibleFrame
-                let size = meetingPromptPanel?.frame.size ?? CGSize(width: 332, height: 180)
-                meetingPromptPanel?.setFrameOrigin(
-                    NSPoint(x: frame.maxX - size.width - 20, y: frame.midY - size.height / 2)
+                panel.setFrameOrigin(
+                    NSPoint(x: frame.midX - size.width / 2, y: frame.minY + 28)
                 )
             }
-            meetingPromptPanel?.orderFrontRegardless()
-        } else {
-            meetingPromptPanel?.orderOut(nil)
+        } else if let host = listeningPill?.contentViewController as? NSHostingController<ListeningPillView> {
+            host.rootView = ListeningPillView(model: self)
         }
+
+        guard let panel = listeningPill else { return }
+
+        let oldFrame = panel.frame
+        // Keep the pill centered horizontally when collapsing/expanding.
+        let newOrigin = NSPoint(
+            x: oldFrame.midX - size.width / 2,
+            y: oldFrame.minY
+        )
+        panel.setFrame(NSRect(origin: newOrigin, size: size), display: true)
+        panel.orderFrontRegardless()
+    }
+
+    private func updateFlowSidebarPanel() {
+        let expanded = (showMeetingPrompt && !meetingPromptMinimized) || flowSidebarExpanded
+        // Includes SwiftUI padding so the shape shadow isn't clipped.
+        let size = expanded
+            ? CGSize(width: 336, height: showMeetingPrompt ? 224 : 176)
+            : CGSize(width: 72, height: 140)
+
+        if meetingPromptPanel == nil {
+            let panel = makeFloatingPanel(size: size, level: .statusBar)
+            panel.contentViewController = ClearHostingController(rootView: MeetingPromptView(model: self))
+            meetingPromptPanel = panel
+
+            if let screen = NSScreen.main {
+                let frame = screen.visibleFrame
+                panel.setFrameOrigin(
+                    NSPoint(
+                        x: frame.maxX - size.width - 12,
+                        y: frame.midY - size.height / 2
+                    )
+                )
+            }
+        } else if let host = meetingPromptPanel?.contentViewController as? NSHostingController<MeetingPromptView> {
+            host.rootView = MeetingPromptView(model: self)
+        }
+
+        guard let panel = meetingPromptPanel else { return }
+
+        // Resize while keeping the trailing edge anchored so expand/collapse doesn't jump.
+        let oldFrame = panel.frame
+        let newOrigin = NSPoint(
+            x: oldFrame.maxX - size.width,
+            y: oldFrame.midY - size.height / 2
+        )
+        panel.setFrame(NSRect(origin: newOrigin, size: size), display: true)
+        panel.orderFrontRegardless()
+    }
+
+    /// Borderless transparent panel — window shadow stays off so we don't get a
+    /// rectangular halo; the SwiftUI views draw their own shape-matched shadow.
+    private func makeFloatingPanel(size: CGSize, level: NSWindow.Level) -> NSPanel {
+        let panel = NSPanel(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.level = level
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.isOpaque = false
+        // SwiftUI hosting views eat background drags — views use WindowDragHandle /
+        // draggablePanel instead. Keeping this false avoids a false sense of support.
+        panel.isMovableByWindowBackground = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        return panel
     }
 }

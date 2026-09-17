@@ -40,6 +40,40 @@ enum CleanupTone: String, Sendable, CaseIterable {
     }
 }
 
+/// One row in Library → Formatting (curated default, history app, or orphan override).
+struct FormattingProfile: Identifiable, Equatable, Sendable {
+    /// Stable id: bundle ID, or a sentinel for the catch-all row.
+    let id: String
+    let name: String
+    let bundleID: String?
+    let tone: CleanupTone
+    let isOverride: Bool
+    /// Informational “everything else → Light” row; not editable.
+    let isCatchAll: Bool
+
+    var canEdit: Bool { !isCatchAll && bundleID != nil }
+}
+
+enum FormattingDefaults {
+    /// Curated apps that mirror `CleanupTone.forApp` buckets (display + override targets).
+    static let curatedApps: [(name: String, bundleID: String)] = [
+        ("Cursor", "com.todesktop.230313mzl4w4u92"),
+        ("VS Code", "com.microsoft.VSCode"),
+        ("Terminal", "com.apple.Terminal"),
+        ("iTerm", "com.googlecode.iterm2"),
+        ("Warp", "dev.warp.Warp-Stable"),
+        ("Xcode", "com.apple.dt.Xcode"),
+        ("Edge", "com.microsoft.edgemac"),
+        ("Chrome", "com.google.Chrome"),
+        ("Safari", "com.apple.Safari"),
+        ("Mail", "com.apple.mail"),
+        ("Slack", "com.tinyspeck.slackmacgap"),
+        ("Outlook", "com.microsoft.Outlook"),
+    ]
+
+    static let catchAllID = "fn-dictate.other-apps"
+}
+
 struct TextCleaner: Sendable {
     func clean(_ text: String, tone: CleanupTone) async -> String {
         let basic = Self.basicCleanup(text)

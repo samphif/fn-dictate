@@ -37,6 +37,7 @@ open build/Build/Products/Debug/FnDictate.app
 
 - Short Fn taps (&lt; ~0.45s) do **not** start dictation (so Fn+function keys still work).
 - Cursor / code editors get light cleanup; Edge / browsers get fuller polish.
+- When you start from a detected Zoom / Teams / Meet call, recording **auto-stops** when that call ends (toggle in the menu bar).
 - Meetings save locally under Application Support → `FnDictate/meetings.json`.
 
 ## First-run permissions

@@ -1,21 +1,74 @@
+import AppKit
 import SwiftUI
 
 struct ListeningPillView: View {
     @Bindable var model: AppModel
 
+    private var isLive: Bool {
+        model.phase == .listening || model.phase == .meetingRecording
+    }
+
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
+        Group {
+            if model.listeningPillCollapsed {
+                collapsedBody
+            } else {
+                expandedBody
+            }
+        }
+        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: model.listeningPillCollapsed)
+        .padding(12)
+        .draggablePanel(
+            onDragStart: { model.listeningPillOrigin() },
+            onDragTo: { model.moveListeningPill(to: $0) }
+        )
+        .preferredColorScheme(.dark)
+    }
+
+    private var collapsedBody: some View {
+        ZStack {
+            // AppKit drag + click (SwiftUI Button fights window dragging).
+            WindowDragHandle(onClick: { model.expandListeningPill() })
+
             VoiceWaveformView(
                 level: model.audioLevel,
-                isActive: model.phase == .listening || model.phase == .meetingRecording,
+                isActive: isLive,
                 tint: indicatorColor
             )
             .frame(width: 44, height: 36)
+            .allowsHitTesting(false)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.22), radius: 10, y: 4)
+        .help("Listening — drag to move, click to show transcript")
+    }
+
+    private var expandedBody: some View {
+        HStack(alignment: .center, spacing: 12) {
+            // Grip + collapse: drag handle interprets short click as collapse.
+            ZStack {
+                WindowDragHandle(onClick: { model.collapseListeningPill() })
+                VoiceWaveformView(
+                    level: model.audioLevel,
+                    isActive: isLive,
+                    tint: indicatorColor
+                )
+                .frame(width: 44, height: 36)
+                .allowsHitTesting(false)
+            }
+            .frame(width: 44, height: 36)
+            .help("Drag to move · click to collapse")
 
             HStack(alignment: .top, spacing: 8) {
                 ScrollingTranscriptView(
                     text: displayText,
-                    isLive: model.phase == .listening || model.phase == .meetingRecording
+                    isLive: isLive
                 )
                 .frame(maxWidth: .infinity, minHeight: 28, maxHeight: 48, alignment: .topLeading)
 
@@ -34,7 +87,6 @@ struct ListeningPillView: View {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .strokeBorder(.white.opacity(0.18), lineWidth: 1)
         )
-        .preferredColorScheme(.dark)
     }
 
     private var displayText: String {
@@ -133,11 +185,115 @@ struct VoiceWaveformView: View {
         let maxExtra: CGFloat = 28
         guard isActive else { return base }
 
-        // Stagger each bar so the waveform feels alive, not a flat level meter.
         let phase = Double(index) * 0.85
         let wobble = (sin(time * (9.0 + Double(index) * 1.7) + phase) + 1) / 2
         let speech = CGFloat(max(0.05, min(1, level)))
         let height = base + maxExtra * (0.25 * CGFloat(wobble) + 0.75 * speech * CGFloat(0.55 + 0.45 * wobble))
         return height
+    }
+}
+
+// MARK: - Panel dragging
+
+extension View {
+    /// SwiftUI drag → AppKit window move. Works alongside buttons via simultaneousGesture.
+    func draggablePanel(
+        onDragStart: @escaping () -> CGPoint,
+        onDragTo: @escaping (CGPoint) -> Void
+    ) -> some View {
+        modifier(AbsolutePanelDragModifier(onDragStart: onDragStart, onDragTo: onDragTo))
+    }
+}
+
+private struct AbsolutePanelDragModifier: ViewModifier {
+    let onDragStart: () -> CGPoint
+    let onDragTo: (CGPoint) -> Void
+
+    @State private var startOrigin: CGPoint?
+    @State private var dragging = false
+
+    func body(content: Content) -> some View {
+        content.simultaneousGesture(
+            DragGesture(minimumDistance: 5, coordinateSpace: .global)
+                .onChanged { value in
+                    if !dragging {
+                        dragging = true
+                        startOrigin = onDragStart()
+                    }
+                    guard let startOrigin else { return }
+                    // SwiftUI +y is down; AppKit window +y is up.
+                    onDragTo(
+                        CGPoint(
+                            x: startOrigin.x + value.translation.width,
+                            y: startOrigin.y - value.translation.height
+                        )
+                    )
+                }
+                .onEnded { _ in
+                    dragging = false
+                    startOrigin = nil
+                }
+        )
+    }
+}
+
+/// AppKit drag handle — click (no drag) fires `onClick`; drag moves the window.
+struct WindowDragHandle: NSViewRepresentable {
+    var onClick: (() -> Void)?
+
+    func makeNSView(context: Context) -> WindowDragNSView {
+        let view = WindowDragNSView()
+        view.onClick = onClick
+        return view
+    }
+
+    func updateNSView(_ nsView: WindowDragNSView, context: Context) {
+        nsView.onClick = onClick
+    }
+}
+
+final class WindowDragNSView: NSView {
+    var onClick: (() -> Void)?
+    private let clickSlop: CGFloat = 5
+
+    override var mouseDownCanMoveWindow: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // Always claim hits inside our bounds so we sit above SwiftUI chrome.
+        bounds.contains(point) ? self : nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        let downScreen = NSEvent.mouseLocation
+        let originOnDown = window.frame.origin
+        var dragged = false
+
+        while true {
+            guard let tracked = window.nextEvent(
+                matching: [.leftMouseDragged, .leftMouseUp],
+                until: .distantFuture,
+                inMode: .eventTracking,
+                dequeue: true
+            ) else { break }
+
+            if tracked.type == .leftMouseUp {
+                if !dragged {
+                    onClick?()
+                }
+                break
+            }
+
+            let now = NSEvent.mouseLocation
+            let dx = now.x - downScreen.x
+            let dy = now.y - downScreen.y
+            if hypot(dx, dy) >= clickSlop {
+                dragged = true
+            }
+            if dragged {
+                window.setFrameOrigin(NSPoint(x: originOnDown.x + dx, y: originOnDown.y + dy))
+            }
+        }
     }
 }

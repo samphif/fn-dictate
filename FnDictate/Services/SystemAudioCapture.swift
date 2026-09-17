@@ -9,7 +9,12 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unc
     var onBuffer: ((AVAudioPCMBuffer) -> Void)?
 
     func start() async throws {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        } catch {
+            throw SystemAudioError.permissionDenied
+        }
         guard let display = content.displays.first else {
             throw SystemAudioError.noDisplay
         }
@@ -102,9 +107,15 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unc
 
     enum SystemAudioError: LocalizedError {
         case noDisplay
+        case permissionDenied
 
         var errorDescription: String? {
-            "No display available for system audio capture."
+            switch self {
+            case .noDisplay:
+                return "No display available for system audio capture."
+            case .permissionDenied:
+                return "Screen Recording permission denied. Enable Fn Dictate in System Settings, then quit and relaunch."
+            }
         }
     }
 }

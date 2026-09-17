@@ -33,6 +33,23 @@ struct MenuBarView: View {
 
                 systemAudioRow
 
+                Toggle(isOn: $model.autoStopRecordingWhenMeetingEnds) {
+                    Label {
+                        Text("Auto-stop when call ends")
+                            .font(.body)
+                    } icon: {
+                        Image(systemName: "stop.circle")
+                            .frame(width: 18, alignment: .center)
+                    }
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .help("When a detected Zoom, Teams, Meet, or similar call ends, stop recording and save notes.")
+
                 Toggle(isOn: $model.learnFromInAppCorrections) {
                     Label {
                         Text("Learn from edits")

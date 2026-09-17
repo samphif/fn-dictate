@@ -8,10 +8,22 @@ System Settings → Privacy & Security:
 
 - [ ] **Microphone** → Fn Dictate on
 - [ ] **Accessibility** → Fn Dictate on (required for Fn capture + paste)
-- [ ] **Screen Recording** → Fn Dictate on (only if you want meeting system audio)
+- [ ] **Screen Recording** (Screen & System Audio Recording) → Fn Dictate on (only if you want meeting system audio)
 
-Xcode Debug builds are ad-hoc signed. Accessibility can need a re-toggle after a rebuild;
-quit the app, flip the Fn Dictate entry off/on, then relaunch from the same Xcode target.
+### Why Xcode keeps asking again (Mac only)
+
+Debug builds must be signed with a **stable Development Team**. Without that, Xcode signs **ad-hoc**, every rebuild gets a new code hash (CDHash), and macOS TCC treats it as a *new app* — so Accessibility / Screen Recording look “missing” again.
+
+This project now sets `DEVELOPMENT_TEAM`. After pulling that change:
+
+1. In Xcode: **Product → Clean Build Folder**, then Run once.
+2. Confirm signing: target → Signing & Capabilities → Team is set (not “None”).
+3. Grant Microphone / Accessibility / Screen Recording **one more time**.
+4. **Fully quit** the app (⌘Q) and Run again — Screen Recording often only applies after relaunch.
+
+iPhone / iPad Simulator doesn’t use the same macOS Screen Recording TCC path, which is why you don’t see this loop there.
+
+If Settings opens but Fn Dictate isn’t listed yet, toggle Screen Recording from the app’s Allow button (or start a meeting with system audio on) so macOS registers the binary, then enable the checkbox.
 
 macOS often applies TCC changes only after a full quit/relaunch of the app.
 

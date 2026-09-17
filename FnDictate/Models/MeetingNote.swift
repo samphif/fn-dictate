@@ -21,6 +21,18 @@ struct MeetingTranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+/// Progress of on-device meeting note refinement (summary / action items / speakers).
+enum MeetingProcessingState: String, Codable, Sendable, Equatable {
+    /// Recording still in progress, or legacy note without status.
+    case idle
+    /// Apple Intelligence is generating structured notes.
+    case processing
+    /// Structured notes are ready.
+    case complete
+    /// Saved transcript, but summary/action items used a limited fallback — retry available.
+    case incomplete
+}
+
 struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
     var title: String
@@ -42,6 +54,12 @@ struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
     var brief: String?
     /// Last mid-meeting catch-up summary (what you missed).
     var catchUp: String?
+    /// Structured-notes pipeline status for UI indicators.
+    var processingState: MeetingProcessingState
+    /// Short status line shown while processing or when incomplete.
+    var processingMessage: String?
+    /// True when system-audio capture was requested but failed to start.
+    var systemAudioCaptureFailed: Bool
 
     init(
         id: UUID = UUID(),
@@ -59,7 +77,10 @@ struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
         calendarEventIdentifier: String? = nil,
         calendarTitle: String? = nil,
         brief: String? = nil,
-        catchUp: String? = nil
+        catchUp: String? = nil,
+        processingState: MeetingProcessingState = .idle,
+        processingMessage: String? = nil,
+        systemAudioCaptureFailed: Bool = false
     ) {
         self.id = id
         self.title = title
@@ -77,12 +98,16 @@ struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
         self.calendarTitle = calendarTitle
         self.brief = brief
         self.catchUp = catchUp
+        self.processingState = processingState
+        self.processingMessage = processingMessage
+        self.systemAudioCaptureFailed = systemAudioCaptureFailed
     }
 
     enum CodingKeys: String, CodingKey {
         case id, title, createdAt, endedAt, transcript, summary
         case decisions, actionItems, openQuestions, includeSystemAudio
         case segments, attendees, calendarEventIdentifier, calendarTitle, brief, catchUp
+        case processingState, processingMessage, systemAudioCaptureFailed
     }
 
     init(from decoder: Decoder) throws {
@@ -103,6 +128,9 @@ struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
         calendarTitle = try c.decodeIfPresent(String.self, forKey: .calendarTitle)
         brief = try c.decodeIfPresent(String.self, forKey: .brief)
         catchUp = try c.decodeIfPresent(String.self, forKey: .catchUp)
+        processingState = try c.decodeIfPresent(MeetingProcessingState.self, forKey: .processingState) ?? .idle
+        processingMessage = try c.decodeIfPresent(String.self, forKey: .processingMessage)
+        systemAudioCaptureFailed = try c.decodeIfPresent(Bool.self, forKey: .systemAudioCaptureFailed) ?? false
     }
 
     /// Recording length when `endedAt` is known; otherwise nil (still in progress / incomplete).

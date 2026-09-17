@@ -28,6 +28,8 @@
 	<string>Fn Dictate</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Fn Dictate records your voice for on-device transcription and meeting notes.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Fn Dictate captures meeting audio from Zoom, Meet, or Teams (not your screen contents) so other speakers appear in the transcript. Requires Screen Recording permission on Mac.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Fn Dictate uses on-device speech recognition to turn your voice into text.</string>
 	<key>NSAppleEventsUsageDescription</key>

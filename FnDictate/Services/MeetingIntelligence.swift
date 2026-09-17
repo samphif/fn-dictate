@@ -16,36 +16,57 @@ struct MeetingIntelligence: Sendable {
         var segments: [MeetingTranscriptSegment]
     }
 
+    struct RefineResult: Sendable {
+        var meeting: RefinedMeeting
+        /// True when Apple Intelligence produced the structured notes.
+        var usedAppleIntelligence: Bool
+        /// Human-readable reason when falling back or partially succeeding.
+        var message: String?
+    }
+
+    /// Soft cap for a single on-device prompt. Longer meetings are chunked.
+    private let maxChunkCharacters = 5_500
+
     func refine(
         transcript: String,
         segments: [MeetingTranscriptSegment],
         attendees: [String],
         calendarTitle: String?,
         dictionaryHints: [String]
-    ) async -> RefinedMeeting {
+    ) async -> RefineResult {
         let labeled = labeledBody(transcript: transcript, segments: segments)
+        let availabilityMessage = appleIntelligenceUnavailableReason()
 
         #if canImport(FoundationModels)
-        if #available(macOS 26, *),
-           let smart = await smartRefine(
-            labeled: labeled,
-            attendees: attendees,
-            calendarTitle: calendarTitle,
-            dictionaryHints: dictionaryHints
-           )
-        {
-            return smart
+        if #available(macOS 26, *), availabilityMessage == nil {
+            if let smart = await smartRefineLongMeeting(
+                labeled: labeled,
+                segments: segments,
+                attendees: attendees,
+                calendarTitle: calendarTitle,
+                dictionaryHints: dictionaryHints
+            ) {
+                return RefineResult(
+                    meeting: smart,
+                    usedAppleIntelligence: true,
+                    message: nil
+                )
+            }
+            return fallbackResult(
+                labeled: labeled,
+                segments: segments,
+                calendarTitle: calendarTitle,
+                message: "Apple Intelligence couldn't finish summarizing this meeting. You can retry."
+            )
         }
         #endif
 
-        return RefinedMeeting(
-            title: calendarTitle?.isEmpty == false ? calendarTitle! : "Meeting",
-            transcript: labeled,
-            summary: fallbackSummary(from: labeled),
-            decisions: [],
-            actionItems: [],
-            openQuestions: [],
-            segments: segments
+        return fallbackResult(
+            labeled: labeled,
+            segments: segments,
+            calendarTitle: calendarTitle,
+            message: availabilityMessage
+                ?? "Apple Intelligence unavailable — showing a short transcript preview."
         )
     }
 
@@ -208,7 +229,9 @@ struct MeetingIntelligence: Sendable {
     }
 
     private func fallbackSummary(from transcript: String) -> String {
-        let sentences = transcript
+        let stripped = transcript
+            .replacingOccurrences(of: #"^\[.*?\]\s*"#, with: "", options: .regularExpression)
+        let sentences = stripped
             .components(separatedBy: CharacterSet(charactersIn: ".!?\n"))
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -217,18 +240,117 @@ struct MeetingIntelligence: Sendable {
         return preview + (preview.hasSuffix(".") ? "" : ".")
     }
 
+    private func fallbackResult(
+        labeled: String,
+        segments: [MeetingTranscriptSegment],
+        calendarTitle: String?,
+        message: String
+    ) -> RefineResult {
+        RefineResult(
+            meeting: RefinedMeeting(
+                title: calendarTitle?.isEmpty == false ? calendarTitle! : "Meeting",
+                transcript: labeled,
+                summary: fallbackSummary(from: labeled),
+                decisions: [],
+                actionItems: [],
+                openQuestions: [],
+                segments: segments
+            ),
+            usedAppleIntelligence: false,
+            message: message
+        )
+    }
+
+    private func appleIntelligenceUnavailableReason() -> String? {
+        #if canImport(FoundationModels)
+        if #available(macOS 26, *) {
+            let model = SystemLanguageModel.default
+            if case .available = model.availability {
+                return nil
+            }
+            return "Apple Intelligence isn't ready. Check System Settings, then retry."
+        }
+        return "macOS 26+ with Apple Intelligence is required for meeting summaries."
+        #else
+        return "Apple Intelligence isn't available in this build."
+        #endif
+    }
+
     #if canImport(FoundationModels)
     @available(macOS 26, *)
-    private func smartRefine(
+    private func smartRefineLongMeeting(
         labeled: String,
+        segments: [MeetingTranscriptSegment],
         attendees: [String],
         calendarTitle: String?,
         dictionaryHints: [String]
     ) async -> RefinedMeeting? {
         let people = attendees.isEmpty ? "unknown" : attendees.joined(separator: ", ")
         let terms = dictionaryHints.prefix(40).joined(separator: ", ")
+
+        let notes: RefinedMeeting?
+        if labeled.count <= maxChunkCharacters {
+            notes = await smartRefineSinglePass(
+                labeled: labeled,
+                attendees: attendees,
+                calendarTitle: calendarTitle,
+                dictionaryHints: dictionaryHints,
+                includeTranscriptRewrite: labeled.count <= 3_500
+            )
+        } else {
+            notes = await smartRefineChunked(
+                labeled: labeled,
+                segments: segments,
+                people: people,
+                calendarTitle: calendarTitle,
+                terms: terms
+            )
+        }
+
+        guard var refined = notes else { return nil }
+
+        let relabeled = await relabelSpeakers(
+            segments: segments.isEmpty ? refined.segments : segments,
+            attendees: attendees
+        )
+        if !relabeled.isEmpty {
+            refined.segments = relabeled
+            refined.transcript = labeledBody(transcript: refined.transcript, segments: relabeled)
+        } else if refined.segments.isEmpty {
+            refined.segments = segments
+        }
+        if refined.transcript.isEmpty {
+            refined.transcript = labeled
+        }
+
+        if refined.title.isEmpty {
+            refined.title = calendarTitle?.isEmpty == false ? calendarTitle! : "Meeting"
+        }
+        return refined
+    }
+
+    @available(macOS 26, *)
+    private func smartRefineSinglePass(
+        labeled: String,
+        attendees: [String],
+        calendarTitle: String?,
+        dictionaryHints: [String],
+        includeTranscriptRewrite: Bool
+    ) async -> RefinedMeeting? {
+        let people = attendees.isEmpty ? "unknown" : attendees.joined(separator: ", ")
+        let terms = dictionaryHints.prefix(40).joined(separator: ", ")
+        let transcriptBlock = includeTranscriptRewrite
+            ? """
+            TRANSCRIPT:
+            <refined labeled transcript, one utterance per line as [Speaker] text>
+            """
+            : """
+            TRANSCRIPT:
+            (omit — keep original)
+            """
+
         let prompt = """
-        Refine this meeting transcript and produce structured notes.
+        Refine this meeting transcript into structured personal notes.
 
         Known attendees (prefer these spellings for speaker labels): \(people)
         Calendar title hint: \(calendarTitle ?? "n/a")
@@ -236,23 +358,20 @@ struct MeetingIntelligence: Sendable {
 
         Rules:
         - Keep [You] for the local participant.
-        - Relabel [Others] lines to a real attendee name when the transcript strongly implies who spoke; otherwise keep [Others].
-        - Fix names using the attendee list and preferred spellings.
-        - Do not invent decisions or action items.
+        - Relabel [Others] (or mislabeled lines) to a real attendee name when the transcript strongly implies who spoke; otherwise keep [Others] or [You].
+        - Extract concrete action items with owners when known — even if worded casually ("I'll send…", "can you…").
+        - Prefer useful key points over filler. Do not invent facts that aren't supported.
 
         Return exactly:
         TITLE: <short title>
-        SUMMARY: <1-3 paragraph overview>
+        SUMMARY: <1-3 paragraph overview of what the meeting was about and outcomes>
         DECISIONS:
         - <key point or decision>
         ACTIONS:
         - <action item with owner when known>
         QUESTIONS:
         - <open question>
-        TRANSCRIPT:
-        <full refined labeled transcript, one utterance per line as [Speaker] text>
-
-        Prefer concrete key points in DECISIONS (outcomes, agreements, important facts), not filler.
+        \(transcriptBlock)
 
         Transcript:
         \(labeled)
@@ -264,6 +383,199 @@ struct MeetingIntelligence: Sendable {
         ) else { return nil }
 
         return parseRefineResponse(content, fallbackSegments: [])
+    }
+
+    @available(macOS 26, *)
+    private func smartRefineChunked(
+        labeled: String,
+        segments: [MeetingTranscriptSegment],
+        people: String,
+        calendarTitle: String?,
+        terms: String
+    ) async -> RefinedMeeting? {
+        let chunks = chunkLabeledTranscript(labeled, segments: segments)
+        guard !chunks.isEmpty else { return nil }
+
+        var partials: [String] = []
+        for (index, chunk) in chunks.enumerated() {
+            let prompt = """
+            Extract structured notes from part \(index + 1) of \(chunks.count) of a longer meeting.
+
+            Known attendees: \(people)
+            Calendar title hint: \(calendarTitle ?? "n/a")
+            Preferred spellings / jargon: \(terms.isEmpty ? "n/a" : terms)
+
+            Return exactly:
+            SUMMARY: <2-5 sentences covering this part only>
+            DECISIONS:
+            - <key point or decision from this part>
+            ACTIONS:
+            - <action item with owner when known>
+            QUESTIONS:
+            - <open question from this part>
+
+            Omit empty sections' bullets. Do not invent items.
+
+            Transcript part:
+            \(chunk)
+            """
+            if let content = await self.prompt(
+                instructions: "You extract concrete meeting notes from a transcript excerpt. Follow the format exactly.",
+                user: prompt
+            ) {
+                partials.append(content)
+            }
+        }
+
+        guard !partials.isEmpty else { return nil }
+
+        let mergePrompt = """
+        Merge these partial meeting notes into one clean personal note.
+
+        Calendar title hint: \(calendarTitle ?? "n/a")
+        Attendees: \(people)
+
+        Deduplicate overlapping items. Prefer concrete actions and decisions. Write a coherent overview.
+
+        Return exactly:
+        TITLE: <short title>
+        SUMMARY: <1-3 paragraph overview>
+        DECISIONS:
+        - <key point or decision>
+        ACTIONS:
+        - <action item with owner when known>
+        QUESTIONS:
+        - <open question>
+
+        Partial notes:
+        \(partials.joined(separator: "\n\n---\n\n"))
+        """
+
+        guard let merged = await self.prompt(
+            instructions: "You merge meeting note excerpts into one accurate note. Follow the format exactly.",
+            user: mergePrompt
+        ) else { return nil }
+
+        var refined = parseRefineResponse(merged, fallbackSegments: segments)
+        if refined.transcript.isEmpty {
+            refined.transcript = labeled
+        }
+        if refined.segments.isEmpty {
+            refined.segments = segments
+        }
+        return refined
+    }
+
+    @available(macOS 26, *)
+    private func relabelSpeakers(
+        segments: [MeetingTranscriptSegment],
+        attendees: [String]
+    ) async -> [MeetingTranscriptSegment] {
+        guard !segments.isEmpty else { return [] }
+        let speakers = Set(segments.map(\.speaker))
+        let onlyYou = speakers.count == 1 && speakers.contains("You")
+        let hasOthers = speakers.contains("Others")
+        // Relabel when we have attendee names and either coarse "Others" labels or a mono "You" mic mix.
+        guard !attendees.isEmpty, onlyYou || hasOthers else {
+            return []
+        }
+
+        var result: [MeetingTranscriptSegment] = []
+        let batches = chunkSegments(segments, maxCharacters: maxChunkCharacters)
+        for batch in batches {
+            let body = batch.map { "[\($0.speaker)] \($0.text)" }.joined(separator: "\n")
+            let prompt = """
+            Relabel speakers for these meeting utterances.
+
+            Known attendees: \(attendees.joined(separator: ", "))
+            Rules:
+            - Keep [You] when the local participant is speaking (first person about their own actions is a hint, not a rule).
+            - Replace [Others] with an attendee name when the content strongly implies who spoke.
+            - If everything is labeled [You] but clearly includes other people talking, relabel those lines to attendees when possible; otherwise leave [You].
+            - Do not change the spoken text — only the [Speaker] label.
+            - Return the same number of lines, one per input line, as [Speaker] text.
+
+            Utterances:
+            \(body)
+            """
+            guard let content = await self.prompt(
+                instructions: "You only relabel speakers. Preserve utterance text. One [Speaker] line per input line.",
+                user: prompt
+            ) else {
+                result.append(contentsOf: batch)
+                continue
+            }
+            let parsed = parseLabeledSegments(from: content.components(separatedBy: .newlines))
+            if parsed.count == batch.count {
+                for (index, seg) in batch.enumerated() {
+                    var updated = seg
+                    updated.speaker = parsed[index].speaker
+                    result.append(updated)
+                }
+            } else {
+                result.append(contentsOf: batch)
+            }
+        }
+        return result
+    }
+
+    private func chunkLabeledTranscript(
+        _ labeled: String,
+        segments: [MeetingTranscriptSegment]
+    ) -> [String] {
+        if !segments.isEmpty {
+            return chunkSegments(segments, maxCharacters: maxChunkCharacters)
+                .map { batch in
+                    batch.map { "[\($0.speaker)] \($0.text)" }.joined(separator: "\n")
+                }
+        }
+        return chunkPlainText(labeled, maxCharacters: maxChunkCharacters)
+    }
+
+    private func chunkSegments(
+        _ segments: [MeetingTranscriptSegment],
+        maxCharacters: Int
+    ) -> [[MeetingTranscriptSegment]] {
+        let ordered = segments.sorted { $0.startOffset < $1.startOffset }
+        var batches: [[MeetingTranscriptSegment]] = []
+        var current: [MeetingTranscriptSegment] = []
+        var size = 0
+        for seg in ordered {
+            let lineSize = seg.speaker.count + seg.text.count + 4
+            if !current.isEmpty, size + lineSize > maxCharacters {
+                batches.append(current)
+                current = []
+                size = 0
+            }
+            current.append(seg)
+            size += lineSize
+        }
+        if !current.isEmpty {
+            batches.append(current)
+        }
+        return batches
+    }
+
+    private func chunkPlainText(_ text: String, maxCharacters: Int) -> [String] {
+        guard text.count > maxCharacters else { return text.isEmpty ? [] : [text] }
+        var chunks: [String] = []
+        var start = text.startIndex
+        while start < text.endIndex {
+            let remaining = text.distance(from: start, to: text.endIndex)
+            let length = min(maxCharacters, remaining)
+            var end = text.index(start, offsetBy: length)
+            if end < text.endIndex,
+               let breakIdx = text[start..<end].lastIndex(of: "\n")
+            {
+                end = text.index(after: breakIdx)
+            }
+            let chunk = String(text[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !chunk.isEmpty {
+                chunks.append(chunk)
+            }
+            start = end
+        }
+        return chunks
     }
 
     @available(macOS 26, *)
@@ -312,6 +624,9 @@ struct MeetingIntelligence: Sendable {
             } else if line.hasPrefix("-") {
                 let item = line.dropFirst().trimmingCharacters(in: .whitespaces)
                 guard !item.isEmpty else { continue }
+                // Skip placeholder / omit lines from the model.
+                let lower = item.lowercased()
+                if lower.hasPrefix("(omit") || lower == "none" || lower == "n/a" { continue }
                 switch section {
                 case "decisions": decisions.append(item)
                 case "actions": actions.append(item)
@@ -326,13 +641,12 @@ struct MeetingIntelligence: Sendable {
         }
 
         let transcript = transcriptLines.joined(separator: "\n")
-        let segments = parseLabeledSegments(from: transcriptLines).isEmpty
-            ? fallbackSegments
-            : parseLabeledSegments(from: transcriptLines)
+        let parsedSegments = parseLabeledSegments(from: transcriptLines)
+        let segments = parsedSegments.isEmpty ? fallbackSegments : parsedSegments
 
         return RefinedMeeting(
             title: title.isEmpty ? "Meeting" : title,
-            transcript: transcript.isEmpty ? content : transcript,
+            transcript: transcript,
             summary: summary,
             decisions: decisions,
             actionItems: actions,
@@ -345,13 +659,14 @@ struct MeetingIntelligence: Sendable {
         var offset: TimeInterval = 0
         var result: [MeetingTranscriptSegment] = []
         for line in lines {
-            guard line.hasPrefix("["),
-                  let close = line.firstIndex(of: "]")
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("["),
+                  let close = trimmed.firstIndex(of: "]")
             else { continue }
-            let speaker = String(line[line.index(after: line.startIndex)..<close])
+            let speaker = String(trimmed[trimmed.index(after: trimmed.startIndex)..<close])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let textStart = line.index(after: close)
-            let text = String(line[textStart...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let textStart = trimmed.index(after: close)
+            let text = String(trimmed[textStart...]).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !speaker.isEmpty, !text.isEmpty else { continue }
             result.append(
                 MeetingTranscriptSegment(startOffset: offset, text: text, speaker: speaker)

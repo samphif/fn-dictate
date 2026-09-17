@@ -5,6 +5,25 @@ struct DetectedMeeting: Equatable, Sendable {
     let appName: String
     let bundleID: String
     let detail: String
+
+    /// Stable id for dismiss / re-prompt — strips unread badges like "(2)" so chat
+    /// title flicker doesn't look like a new meeting.
+    var fingerprint: String {
+        let normalized = Self.normalizeDetail(detail)
+        return "\(appName)|\(normalized)"
+    }
+
+    private static func normalizeDetail(_ detail: String) -> String {
+        var s = detail
+        if let regex = try? NSRegularExpression(pattern: #"^\(\d+\)\s*"#) {
+            s = regex.stringByReplacingMatches(
+                in: s,
+                range: NSRange(s.startIndex..., in: s),
+                withTemplate: ""
+            )
+        }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
 }
 
 /// Watches for Zoom / Teams / Meet / Webex / FaceTime and surfaces a prompt
@@ -12,14 +31,24 @@ struct DetectedMeeting: Equatable, Sendable {
 @MainActor
 final class MeetingDetector {
     var onMeetingDetected: ((DetectedMeeting) -> Void)?
-    var onMeetingEnded: (() -> Void)?
+    /// Fired when a previously confirmed call is no longer visible (or dismissed).
+    var onMeetingEnded: ((DetectedMeeting) -> Void)?
 
     private var timer: Timer?
     private var workspaceObservers: [NSObjectProtocol] = []
     private var lastDetected: DetectedMeeting?
-    /// Bundle IDs the user dismissed until that app quits (or detector restarts).
+    /// Bundle IDs the user dismissed (cleared when that app family quits or snooze ends).
     private var dismissedBundleIDs: Set<String> = []
-    private var runningMeetingBundleIDs: Set<String> = []
+    private var dismissedFingerprints: Set<String> = []
+    /// App-family → don't re-prompt until this date (Not now).
+    private var snoozedFamiliesUntil: [String: Date] = [:]
+    /// Require a few consistent scans so flaky window titles don't flap the UI.
+    private var positiveStreak = 0
+    private var negativeStreak = 0
+    private var pendingDetection: DetectedMeeting?
+    private let confirmHits = 2
+    private let confirmMisses = 3
+    private let snoozeDuration: TimeInterval = 45 * 60
 
     private let knownApps: [(bundleID: String, name: String)] = [
         ("us.zoom.xos", "Zoom"),
@@ -65,15 +94,29 @@ final class MeetingDetector {
     }
 
     func dismissCurrent() {
-        if let lastDetected {
-            dismissedBundleIDs.insert(lastDetected.bundleID)
+        let ended = lastDetected
+        if let ended {
+            let family = Self.appFamily(for: ended.bundleID, appName: ended.appName)
+            dismissedFingerprints.insert(ended.fingerprint)
+            // Snooze the whole app family so title flicker can't re-prompt immediately.
+            snoozedFamiliesUntil[family] = Date().addingTimeInterval(snoozeDuration)
+            for bid in Self.bundleIDs(inFamily: family) {
+                dismissedBundleIDs.insert(bid)
+            }
         }
         lastDetected = nil
-        onMeetingEnded?()
+        pendingDetection = nil
+        positiveStreak = 0
+        negativeStreak = 0
+        if let ended {
+            onMeetingEnded?(ended)
+        }
     }
 
     func clearDismissal(for bundleID: String) {
         dismissedBundleIDs.remove(bundleID)
+        let family = Self.appFamily(for: bundleID, appName: nil)
+        snoozedFamiliesUntil.removeValue(forKey: family)
     }
 
     private func observeWorkspace() {
@@ -94,6 +137,39 @@ final class MeetingDetector {
     }
 
     private func scan() {
+        pruneDismissalsAgainstRunningApps()
+
+        let running = NSWorkspace.shared.runningApplications
+        let raw = detectMeeting(from: running)
+
+        if let raw {
+            negativeStreak = 0
+            if pendingDetection?.fingerprint == raw.fingerprint {
+                positiveStreak += 1
+            } else {
+                pendingDetection = raw
+                positiveStreak = 1
+            }
+
+            guard positiveStreak >= confirmHits else { return }
+            guard !isSuppressed(raw) else { return }
+
+            if lastDetected?.fingerprint != raw.fingerprint {
+                lastDetected = raw
+                onMeetingDetected?(raw)
+            }
+        } else {
+            positiveStreak = 0
+            pendingDetection = nil
+            negativeStreak += 1
+            if let ended = lastDetected, negativeStreak >= confirmMisses {
+                lastDetected = nil
+                onMeetingEnded?(ended)
+            }
+        }
+    }
+
+    private func pruneDismissalsAgainstRunningApps() {
         let running = NSWorkspace.shared.runningApplications
         let currentMeetingBundles = Set(
             running.compactMap { app -> String? in
@@ -103,64 +179,59 @@ final class MeetingDetector {
             }
         )
 
-        // If a dismissed meeting app quit, allow prompts again next time.
+        // If a dismissed meeting app family fully quit, allow prompts next launch.
         for bid in dismissedBundleIDs where !currentMeetingBundles.contains(bid) {
-            dismissedBundleIDs.remove(bid)
+            let family = Self.appFamily(for: bid, appName: nil)
+            let familyStillRunning = Self.bundleIDs(inFamily: family)
+                .contains(where: { currentMeetingBundles.contains($0) })
+            if !familyStillRunning {
+                dismissedBundleIDs.remove(bid)
+            }
         }
-        runningMeetingBundleIDs = currentMeetingBundles
 
-        if let detected = detectMeeting(from: running) {
-            if dismissedBundleIDs.contains(detected.bundleID) {
-                return
+        let now = Date()
+        for (family, until) in snoozedFamiliesUntil where until <= now {
+            snoozedFamiliesUntil.removeValue(forKey: family)
+            // Allow a later call in the same app; keep fingerprints so the same
+            // dismissed session doesn't immediately return.
+            for bid in Self.bundleIDs(inFamily: family) {
+                dismissedBundleIDs.remove(bid)
             }
-            if detected != lastDetected {
-                lastDetected = detected
-                onMeetingDetected?(detected)
-            }
-        } else if lastDetected != nil {
-            lastDetected = nil
-            onMeetingEnded?()
         }
+
+        if currentMeetingBundles.isEmpty {
+            dismissedFingerprints.removeAll()
+            dismissedBundleIDs.removeAll()
+        }
+    }
+
+    private func isSuppressed(_ meeting: DetectedMeeting) -> Bool {
+        if dismissedFingerprints.contains(meeting.fingerprint) { return true }
+        if dismissedBundleIDs.contains(meeting.bundleID) { return true }
+        let family = Self.appFamily(for: meeting.bundleID, appName: meeting.appName)
+        if let until = snoozedFamiliesUntil[family], until > Date() { return true }
+        return false
     }
 
     private func detectMeeting(from running: [NSRunningApplication]) -> DetectedMeeting? {
         let windowInfo = Self.onScreenWindowInfo()
 
-        // Prefer strong "in a call" signals from window titles.
+        // Only strong "in a call" signals — never "app is merely open / frontmost".
         if let hit = detectFromWindows(windowInfo) {
             return hit
         }
 
-        // Native meeting apps that are frontmost — likely in/joining a call.
-        if let front = NSWorkspace.shared.frontmostApplication,
-           let bid = front.bundleIdentifier,
-           let known = knownApps.first(where: { $0.bundleID == bid })
-        {
-            // Slack/Discord only when window title looks like a huddle/call.
-            if bid.contains("slack") || bid.contains("Discord") {
-                return nil
-            }
-            return DetectedMeeting(
-                appName: known.name,
-                bundleID: bid,
-                detail: "\(known.name) is active"
-            )
-        }
-
-        // Meeting app running with an on-screen call-like window.
+        // FaceTime is call-first; a visible FaceTime window is enough.
         for app in running {
             guard let bid = app.bundleIdentifier,
-                  let known = knownApps.first(where: { $0.bundleID == bid }),
-                  !bid.contains("slack"),
-                  !bid.contains("Discord")
+                  bid == "com.apple.FaceTime"
             else { continue }
-
             let titles = windowInfo.filter { $0.ownerPID == app.processIdentifier }.map(\.title)
-            if titles.contains(where: { Self.looksLikeCallTitle($0, appName: known.name) }) {
+            if titles.contains(where: { !$0.isEmpty }) {
                 return DetectedMeeting(
-                    appName: known.name,
+                    appName: "FaceTime",
                     bundleID: bid,
-                    detail: "Call window detected"
+                    detail: titles.first(where: { !$0.isEmpty }) ?? "FaceTime"
                 )
             }
         }
@@ -188,10 +259,7 @@ final class MeetingDetector {
                     detail: title
                 )
             }
-            if title.localizedCaseInsensitiveContains("| Microsoft Teams")
-                || title.localizedCaseInsensitiveContains("Meeting with")
-                   && title.localizedCaseInsensitiveContains("Teams")
-            {
+            if Self.looksLikeTeamsCallTitle(title) {
                 return DetectedMeeting(
                     appName: "Teams",
                     bundleID: bundleID(forPID: window.ownerPID) ?? "com.microsoft.teams2",
@@ -216,8 +284,51 @@ final class MeetingDetector {
                     detail: "Huddle in progress"
                 )
             }
+            if title.localizedCaseInsensitiveContains("voice channel")
+                || (title.localizedCaseInsensitiveContains("discord")
+                    && title.localizedCaseInsensitiveContains("call"))
+            {
+                if bundleID(forPID: window.ownerPID)?.contains("Discord") == true {
+                    return DetectedMeeting(
+                        appName: "Discord",
+                        bundleID: bundleID(forPID: window.ownerPID) ?? "com.hnc.Discord",
+                        detail: title
+                    )
+                }
+            }
         }
         return nil
+    }
+
+    /// Teams chat/channel/calendar titles all end in "| Microsoft Teams" — that alone
+    /// is not a meeting. Only match call-specific title wording.
+    private static func looksLikeTeamsCallTitle(_ title: String) -> Bool {
+        if isTeamsNonCallChrome(title) { return false }
+
+        let lower = title.lowercased()
+        // "Meeting with Alex | Microsoft Teams", "Call with Alex | …"
+        if lower.contains("meeting with") || lower.contains("call with") {
+            return true
+        }
+        // Native call chrome (avoid bare "meeting" — channel names use that often).
+        if lower.contains("call in progress")
+            || lower.contains("ongoing call")
+            || lower.contains("teams call")
+            || lower.contains("| meeting |")
+        {
+            return true
+        }
+        return false
+    }
+
+    private static func isTeamsNonCallChrome(_ title: String) -> Bool {
+        let lower = title.lowercased()
+        if lower.contains("chat |") || lower.contains("| chat") { return true }
+        if lower.range(of: #"\(\d+\)\s*chat"#, options: .regularExpression) != nil { return true }
+        if lower.contains("calendar") { return true }
+        if lower.contains("activity |") || lower.hasPrefix("activity") { return true }
+        if lower.contains("teams and channels") { return true }
+        return false
     }
 
     private static func meetsBrowserMeet(_ title: String) -> Bool {
@@ -228,15 +339,34 @@ final class MeetingDetector {
             || lower.contains(" · meet")
     }
 
-    private static func looksLikeCallTitle(_ title: String, appName: String) -> Bool {
-        let lower = title.lowercased()
-        if lower.contains("meeting") || lower.contains("call") || lower.contains("webinar") {
-            return true
+    private static func appFamily(for bundleID: String, appName: String?) -> String {
+        if let appName, !appName.isEmpty { return appName.lowercased() }
+        if bundleID.contains("teams") { return "teams" }
+        if bundleID.contains("zoom") { return "zoom" }
+        if bundleID.contains("webex") { return "webex" }
+        if bundleID.contains("FaceTime") { return "facetime" }
+        if bundleID.contains("slack") { return "slack" }
+        if bundleID.contains("Discord") { return "discord" }
+        return bundleID
+    }
+
+    private static func bundleIDs(inFamily family: String) -> [String] {
+        switch family.lowercased() {
+        case "teams":
+            return ["com.microsoft.teams2", "com.microsoft.teams", "com.microsoft.teams.mac"]
+        case "zoom":
+            return ["us.zoom.xos", "zoom.us"]
+        case "webex":
+            return ["com.cisco.webexmeetingsapp", "com.webex.meetingmanager"]
+        case "facetime":
+            return ["com.apple.FaceTime"]
+        case "slack":
+            return ["com.tinyspeck.slackmacgap"]
+        case "discord":
+            return ["com.hnc.Discord"]
+        default:
+            return []
         }
-        if appName == "Zoom" && (lower.contains("zoom") && title.count > 4) {
-            return lower.contains("zoom meeting") || lower.contains("zoom webinar")
-        }
-        return false
     }
 
     private func bundleID(forPID pid: pid_t) -> String? {
