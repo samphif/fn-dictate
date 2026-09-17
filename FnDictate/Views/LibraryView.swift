@@ -108,9 +108,9 @@ struct LibraryView: View {
     @State private var dismissDictionaryTip = false
     @State private var dictationFilter: DictationFilter = .all
     @State private var dictionaryFilter: DictionaryFilter = .all
-    @State private var hoveredDictationID: TranscriptEntry.ID?
     @State private var hoveredDictionaryID: DictionaryEntry.ID?
     @State private var hoveredMeetingID: MeetingNote.ID?
+    @State private var remindersExportNote: MeetingNote?
 
     enum LibrarySection: String, CaseIterable, Identifiable {
         case dictations
@@ -178,10 +178,32 @@ struct LibraryView: View {
         .sheet(isPresented: $showAddWordSheet) {
             addWordSheet
         }
-        .onAppear { applyRequestedTab() }
+        .sheet(item: $remindersExportNote) { note in
+            SendActionItemsToRemindersSheet(note: note, reminders: model.reminders)
+        }
+        .onAppear {
+            applyRequestedTab()
+            syncWindowTitle()
+        }
         .onChange(of: model.requestedLibraryTab) { _, _ in
             applyRequestedTab()
         }
+        .onChange(of: section) { _, _ in
+            syncWindowTitle()
+        }
+    }
+
+    /// Keep the AppKit title bar in sync with the active sidebar section.
+    private func syncWindowTitle() {
+        let title = section.help
+        if let window = NSApp.windows.first(where: {
+            $0.identifier?.rawValue == AppModel.libraryWindowIdentifier
+        }) {
+            window.title = title
+            return
+        }
+        // Hosting controller window before identifier is applied.
+        NSApp.keyWindow?.title = title
     }
 
     // MARK: Sidebar
@@ -189,11 +211,24 @@ struct LibraryView: View {
     private var flowSidebar: some View {
         VStack(spacing: 6) {
             Image(systemName: "waveform")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(FlowTheme.ink.opacity(0.75))
-                .frame(width: 40, height: 40)
-                .padding(.top, 10)
-                .padding(.bottom, 8)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(FlowTheme.muted)
+                .frame(width: 26, height: 26)
+                .background(
+                    Circle()
+                        .fill(FlowTheme.cream.opacity(0.85))
+                )
+                .padding(.top, 14)
+                .padding(.bottom, 2)
+                .accessibilityLabel("Fn Dictate")
+                .accessibilityAddTraits(.isImage)
+                .allowsHitTesting(false)
+
+            Rectangle()
+                .fill(FlowTheme.hairline)
+                .frame(width: 18, height: 1)
+                .padding(.bottom, 4)
+                .accessibilityHidden(true)
 
             ForEach(LibrarySection.allCases) { item in
                 sidebarButton(item)
@@ -310,7 +345,7 @@ struct LibraryView: View {
     private var dictationsPane: some View {
         HStack(alignment: .top, spacing: 20) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
+                LazyVStack(alignment: .leading, spacing: 22) {
                     Text("Welcome back, \(firstName)")
                         .font(.system(size: 28, weight: .semibold))
                         .foregroundStyle(FlowTheme.ink)
@@ -347,7 +382,6 @@ struct LibraryView: View {
                 .padding(.bottom, 24)
                 .transition(.move(edge: .trailing).combined(with: .opacity))
         }
-        .animation(.easeInOut(duration: 0.22), value: selectedDictationID)
     }
 
     private var dictationFilterBar: some View {
@@ -450,21 +484,35 @@ struct LibraryView: View {
     }
 
     private func dictationDaySection(title: String, entries: [TranscriptEntry]) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let lastID = entries.last?.id
+        return VStack(alignment: .leading, spacing: 0) {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(FlowTheme.muted)
                 .tracking(0.6)
                 .padding(.bottom, 10)
 
-            VStack(spacing: 0) {
-                ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
-                    dictationRow(entry)
-                    if index < entries.count - 1 {
-                        Rectangle()
-                            .fill(FlowTheme.hairline)
-                            .frame(height: 1)
-                    }
+            LazyVStack(spacing: 0) {
+                ForEach(entries) { entry in
+                    DictationRowView(
+                        entry: entry,
+                        selected: selectedDictationID == entry.id,
+                        showDivider: entry.id != lastID,
+                        onSelect: { openDictationEditor(entry) },
+                        onCopy: {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(entry.text, forType: .string)
+                            flash("Copied")
+                        },
+                        onPaste: { TextPaster.paste(entry.text) },
+                        onDelete: {
+                            model.history.delete(entry)
+                            if selectedDictationID == entry.id {
+                                selectedDictationID = nil
+                                draftText = ""
+                            }
+                        }
+                    )
                 }
             }
             .padding(.horizontal, 4)
@@ -474,140 +522,6 @@ struct LibraryView: View {
                     .stroke(FlowTheme.hairline, lineWidth: 1)
             )
         }
-    }
-
-    private func dictationRow(_ entry: TranscriptEntry) -> some View {
-        let selected = selectedDictationID == entry.id
-        let hovered = hoveredDictationID == entry.id
-        let showActions = selected || hovered
-        return HStack(alignment: .top, spacing: 14) {
-            Text(entry.createdAt.formatted(date: .omitted, time: .shortened).lowercased())
-                .font(.system(size: 12))
-                .foregroundStyle(FlowTheme.muted)
-                .frame(width: 64, alignment: .leading)
-                .padding(.top, 2)
-
-            dictationAppBadge(entry)
-                .padding(.top, 1)
-
-            Text(entry.text)
-                .font(.system(size: 14))
-                .foregroundStyle(FlowTheme.ink)
-                .lineLimit(selected ? nil : 3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textSelection(.enabled)
-
-            if entry.isRevised {
-                Text("Revised")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(FlowTheme.ink.opacity(0.75))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(FlowTheme.accentSoft, in: Capsule())
-                    .help("This dictation was edited from the original transcript")
-                    .padding(.top, 1)
-            }
-
-            // Always reserve trailing space so hover/selection doesn't reflow text.
-            HStack(spacing: 10) {
-                iconAction("doc.on.doc") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(entry.text, forType: .string)
-                    flash("Copied")
-                }
-                iconAction("pencil") {
-                    openDictationEditor(entry)
-                }
-                Menu {
-                    Button("Paste into frontmost app") {
-                        TextPaster.paste(entry.text)
-                    }
-                    Button("Delete", role: .destructive) {
-                        model.history.delete(entry)
-                        if selectedDictationID == entry.id {
-                            selectedDictationID = nil
-                            draftText = ""
-                        }
-                    }
-                } label: {
-                    Image(systemName: "ellipsis")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(FlowTheme.muted)
-                }
-            }
-            .padding(.top, 2)
-            .opacity(showActions ? 1 : 0)
-            .allowsHitTesting(showActions)
-            .accessibilityHidden(!showActions)
-        }
-        .padding(.vertical, 14)
-        .padding(.horizontal, 12)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(selected ? FlowTheme.cream : Color.clear)
-        )
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            hoveredDictationID = hovering ? entry.id : (hoveredDictationID == entry.id ? nil : hoveredDictationID)
-        }
-        .onTapGesture {
-            openDictationEditor(entry)
-        }
-        .contextMenu {
-            Button("Copy") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(entry.text, forType: .string)
-            }
-            Button("Delete", role: .destructive) {
-                model.history.delete(entry)
-                if selectedDictationID == entry.id {
-                    selectedDictationID = nil
-                    draftText = ""
-                }
-            }
-        }
-    }
-
-    private func dictationAppBadge(_ entry: TranscriptEntry) -> some View {
-        HStack(spacing: 6) {
-            if let icon = appIcon(for: entry) {
-                Image(nsImage: icon)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 16, height: 16)
-                    .cornerRadius(3)
-            } else {
-                Image(systemName: "app.fill")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(FlowTheme.muted)
-                    .frame(width: 16, height: 16)
-            }
-
-            Text(AppDisplayName.short(name: entry.appName, bundleID: entry.appBundleID))
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(FlowTheme.muted)
-                .lineLimit(1)
-                .truncationMode(.tail)
-        }
-        .frame(width: 88, alignment: .leading)
-        .help(entry.appName ?? "Unknown app")
-    }
-
-    private func appIcon(for entry: TranscriptEntry) -> NSImage? {
-        if let bundleID = entry.appBundleID,
-           let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
-        {
-            return NSWorkspace.shared.icon(forFile: url.path)
-        }
-        if let name = entry.appName,
-           let app = NSWorkspace.shared.runningApplications.first(where: {
-               $0.localizedName?.caseInsensitiveCompare(name) == .orderedSame
-           }),
-           let bundleURL = app.bundleURL
-        {
-            return NSWorkspace.shared.icon(forFile: bundleURL.path)
-        }
-        return nil
     }
 
     private var emptyDictations: some View {
@@ -728,8 +642,15 @@ struct LibraryView: View {
         let baseline = entry.text
         let compareFrom = entry.originalText ?? baseline
         let compareTo = draftText
-        let revisionSpans = DictionaryStore.revisionSpans(from: compareFrom, to: compareTo)
-        let showRevisionDiff = !revisionSpans.isEmpty
+        // Only surface ASR→text cleanup when the user hasn't revised yet, and label it clearly.
+        let speechCleanupSpans = (!entry.isRevised && draftText == entry.text)
+            ? DictionaryStore.revisionSpans(from: compareFrom, to: compareTo)
+            : []
+        let editSpans = (draftText != entry.text)
+            ? DictionaryStore.revisionSpans(from: entry.text, to: draftText)
+            : (entry.isRevised
+                ? DictionaryStore.revisionSpans(from: compareFrom, to: compareTo)
+                : [])
         let corrections = learnFromEdits && draftText != baseline
             ? model.dictionary.previewCorrections(from: baseline, to: draftText)
             : []
@@ -778,12 +699,21 @@ struct LibraryView: View {
                 .toggleStyle(.checkbox)
                 .font(.caption)
 
-            if showRevisionDiff {
+            if !speechCleanupSpans.isEmpty {
                 revisionDiffSection(
-                    spans: revisionSpans,
-                    willLearnOnSave: learnFromEdits
-                        && entry.originalText == nil
-                        && !corrections.isEmpty
+                    title: "From speech",
+                    spans: speechCleanupSpans,
+                    footnote: nil
+                )
+            }
+
+            if !editSpans.isEmpty, entry.isRevised || draftText != entry.text {
+                revisionDiffSection(
+                    title: "Changes",
+                    spans: editSpans,
+                    footnote: learnFromEdits && !corrections.isEmpty
+                        ? "Saving will learn matching corrections."
+                        : nil
                 )
             }
 
@@ -807,7 +737,7 @@ struct LibraryView: View {
             }
 
             // Further edits on an already-revised entry — learn from current → draft only.
-            if !corrections.isEmpty, entry.originalText != nil {
+            if !corrections.isEmpty, entry.isRevised {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Will learn")
                         .font(.system(size: 11, weight: .semibold))
@@ -844,11 +774,12 @@ struct LibraryView: View {
     }
 
     private func revisionDiffSection(
+        title: String,
         spans: [(removed: String, added: String)],
-        willLearnOnSave: Bool
+        footnote: String?
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Changes")
+            Text(title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(FlowTheme.muted)
                 .tracking(0.4)
@@ -857,8 +788,8 @@ struct LibraryView: View {
                 revisionChangeChip(removed: span.removed, added: span.added)
             }
 
-            if willLearnOnSave {
-                Text("Saving will learn matching corrections.")
+            if let footnote {
+                Text(footnote)
                     .font(.system(size: 11))
                     .foregroundStyle(FlowTheme.muted)
             }
@@ -955,7 +886,6 @@ struct LibraryView: View {
                 let learned = model.dictionary.learn(from: baseline, to: trimmed)
                 if learned > 0 {
                     banner = "Saved · learned \(learned) correction\(learned == 1 ? "" : "s")"
-                    section = .dictionary
                 } else {
                     banner = "Saved · couldn’t auto-detect word fixes — add them in Dictionary"
                 }
@@ -985,7 +915,7 @@ struct LibraryView: View {
 
     private var dictionaryPane: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            LazyVStack(alignment: .leading, spacing: 20) {
                 HStack {
                     Text("Dictionary")
                         .font(.system(size: 28, weight: .semibold))
@@ -1053,7 +983,7 @@ struct LibraryView: View {
                         Text("Learn from in-app corrections")
                             .font(.system(size: 14, weight: .medium))
                             .foregroundStyle(FlowTheme.ink)
-                        Text("After paste, watch the focused field for spelling fixes (Accessibility).")
+                        Text("After paste, watch the focused field for spelling fixes. In Cursor, if the field can’t be read, select-all and copy (⌘A ⌘C) after editing — or fix in Library.")
                             .font(.system(size: 12))
                             .foregroundStyle(FlowTheme.muted)
                     }
@@ -1091,13 +1021,9 @@ struct LibraryView: View {
                 )
 
             VStack(alignment: .leading, spacing: 12) {
-                (
-                    Text("Fn Dictate spells the way ")
-                    + Text("you").italic()
-                    + Text(" do.")
-                )
-                .font(.system(size: 28, weight: .regular, design: .serif))
-                .foregroundStyle(.white)
+                Text("Fn Dictate spells the way *you* do.")
+                    .font(.system(size: 28, weight: .regular, design: .serif))
+                    .foregroundStyle(.white)
 
                 Text("Correct a spelling once in any app after paste, or add it here — company jargon and uncommon names stay spelled right.")
                     .font(.system(size: 14))
@@ -1373,7 +1299,7 @@ struct LibraryView: View {
     private var meetingsPane: some View {
         HStack(alignment: .top, spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+                LazyVStack(alignment: .leading, spacing: 20) {
                     HStack {
                         Text("Notetaker")
                             .font(.system(size: 26, weight: .semibold))
@@ -1682,23 +1608,74 @@ struct LibraryView: View {
 
     private func meetingRow(_ note: MeetingNote) -> some View {
         let selected = selectedMeetingID == note.id
-        return HStack(spacing: 12) {
+        let metaParts: [String] = {
+            var parts = [note.createdAt.formatted(date: .omitted, time: .shortened).lowercased()]
+            if let duration = note.formattedDuration {
+                parts.append(duration)
+            }
+            if note.wordCount > 0 {
+                parts.append(note.formattedWordCount)
+            }
+            return parts
+        }()
+        let actionPreview = note.actionItems.first
+
+        return HStack(alignment: .top, spacing: 12) {
             Image(systemName: "doc.text")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(FlowTheme.muted)
                 .frame(width: 34, height: 34)
                 .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(note.title)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(FlowTheme.ink)
                     .lineLimit(1)
-                Text(note.createdAt.formatted(date: .omitted, time: .shortened).lowercased())
+
+                Text(metaParts.joined(separator: " · "))
                     .font(.system(size: 12))
                     .foregroundStyle(FlowTheme.muted)
+                    .lineLimit(1)
+
+                if let actionPreview {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Image(systemName: "checklist")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(FlowTheme.muted)
+                        Text(actionPreview)
+                            .font(.system(size: 12))
+                            .foregroundStyle(FlowTheme.ink.opacity(0.82))
+                            .lineLimit(1)
+                        if note.actionItems.count > 1 {
+                            Text("+\(note.actionItems.count - 1)")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(FlowTheme.muted)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(FlowTheme.hairline, in: Capsule())
+                        }
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(
+                        note.actionItems.count == 1
+                            ? "1 action item: \(actionPreview)"
+                            : "\(note.actionItems.count) action items. First: \(actionPreview)"
+                    )
+                }
             }
-            Spacer()
+            Spacer(minLength: 8)
+
+            if !note.actionItems.isEmpty {
+                Text("\(note.actionItems.count)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(FlowTheme.ink.opacity(0.75))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(FlowTheme.accentSoft, in: Capsule())
+                    .help("\(note.actionItems.count) action item\(note.actionItems.count == 1 ? "" : "s")")
+                    .accessibilityHidden(true)
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 10)
@@ -1716,11 +1693,18 @@ struct LibraryView: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(note.markdownExport, forType: .string)
             }
+            if !note.actionItems.isEmpty {
+                Button("Send action items to Reminders…") {
+                    selectedMeetingID = note.id
+                    remindersExportNote = note
+                }
+            }
             Button("Delete", role: .destructive) {
                 model.meetings.delete(note)
                 if selectedMeetingID == note.id { selectedMeetingID = nil }
             }
         }
+        .accessibilityElement(children: .combine)
     }
 
     private var emptyMeetings: some View {
@@ -1740,7 +1724,7 @@ struct LibraryView: View {
         if let id = selectedMeetingID,
            let note = model.meetings.notes.first(where: { $0.id == id })
         {
-            MeetingPreviewCard(note: note)
+            MeetingPreviewCard(note: note, reminders: model.reminders)
                 .frame(width: 320)
         } else {
             VStack(spacing: 10) {
@@ -1834,87 +1818,371 @@ struct LibraryView: View {
     }
 }
 
+// MARK: - Dictation row (isolated hover + cached icons)
+
+@MainActor
+private enum AppIconCache {
+    private static var icons: [String: NSImage] = [:]
+    private static var misses: Set<String> = []
+
+    static func icon(bundleID: String?, appName: String?) -> NSImage? {
+        let key = bundleID ?? appName ?? ""
+        guard !key.isEmpty else { return nil }
+        if let cached = icons[key] { return cached }
+        if misses.contains(key) { return nil }
+
+        let resolved: NSImage?
+        if let bundleID,
+           let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+        {
+            resolved = NSWorkspace.shared.icon(forFile: url.path)
+        } else if let appName,
+                  let app = NSWorkspace.shared.runningApplications.first(where: {
+                      $0.localizedName?.caseInsensitiveCompare(appName) == .orderedSame
+                  }),
+                  let bundleURL = app.bundleURL
+        {
+            resolved = NSWorkspace.shared.icon(forFile: bundleURL.path)
+        } else {
+            resolved = nil
+        }
+
+        if let resolved {
+            icons[key] = resolved
+        } else {
+            misses.insert(key)
+        }
+        return resolved
+    }
+}
+
+private struct DictationRowView: View {
+    let entry: TranscriptEntry
+    let selected: Bool
+    let showDivider: Bool
+    let onSelect: () -> Void
+    let onCopy: () -> Void
+    let onPaste: () -> Void
+    let onDelete: () -> Void
+
+    @State private var isHovered = false
+
+    private var showActions: Bool { selected || isHovered }
+
+    private var timeLabel: String {
+        entry.createdAt.formatted(date: .omitted, time: .shortened).lowercased()
+    }
+
+    private var appLabel: String {
+        AppDisplayName.short(name: entry.appName, bundleID: entry.appBundleID)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 14) {
+                Text(timeLabel)
+                    .font(.system(size: 12))
+                    .foregroundStyle(FlowTheme.muted)
+                    .frame(width: 64, alignment: .leading)
+                    .padding(.top, 2)
+
+                appBadge
+                    .padding(.top, 1)
+
+                Text(entry.text)
+                    .font(.system(size: 14))
+                    .foregroundStyle(FlowTheme.ink)
+                    .lineLimit(selected ? nil : 3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+
+                if entry.isRevised {
+                    Text("Revised")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(FlowTheme.ink.opacity(0.75))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(FlowTheme.accentSoft, in: Capsule())
+                        .help("This dictation was edited from the original transcript")
+                        .padding(.top, 1)
+                }
+
+                // Always reserve trailing space so hover/selection doesn't reflow text.
+                HStack(spacing: 10) {
+                    rowIconButton("doc.on.doc", action: onCopy)
+                    rowIconButton("pencil", action: onSelect)
+                    Menu {
+                        Button("Paste into frontmost app", action: onPaste)
+                        Button("Delete", role: .destructive, action: onDelete)
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(FlowTheme.muted)
+                    }
+                }
+                .padding(.top, 2)
+                .opacity(showActions ? 1 : 0)
+                .allowsHitTesting(showActions)
+                .accessibilityHidden(!showActions)
+            }
+            .padding(.vertical, 14)
+            .padding(.horizontal, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(selected ? FlowTheme.cream : Color.clear)
+            )
+            .contentShape(Rectangle())
+            .onHover { isHovered = $0 }
+            .onTapGesture(perform: onSelect)
+            .contextMenu {
+                Button("Copy", action: onCopy)
+                Button("Delete", role: .destructive, action: onDelete)
+            }
+
+            if showDivider {
+                Rectangle()
+                    .fill(FlowTheme.hairline)
+                    .frame(height: 1)
+            }
+        }
+    }
+
+    private var appBadge: some View {
+        HStack(spacing: 6) {
+            if let icon = AppIconCache.icon(bundleID: entry.appBundleID, appName: entry.appName) {
+                Image(nsImage: icon)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 16, height: 16)
+                    .cornerRadius(3)
+            } else {
+                Image(systemName: "app.fill")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(FlowTheme.muted)
+                    .frame(width: 16, height: 16)
+            }
+
+            Text(appLabel)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(FlowTheme.muted)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .frame(width: 88, alignment: .leading)
+        .help(entry.appName ?? "Unknown app")
+    }
+
+    private func rowIconButton(_ systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(FlowTheme.muted)
+                .frame(width: 24, height: 24)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 // MARK: - Meeting preview / detail
 
 private struct MeetingPreviewCard: View {
     let note: MeetingNote
+    var reminders: RemindersService
     @State private var showFull = false
+    @State private var showRemindersExport = false
+
+    private var metaLine: String {
+        var parts: [String] = []
+        if Calendar.current.isDateInToday(note.createdAt) {
+            parts.append("Today · \(note.createdAt.formatted(date: .omitted, time: .shortened).lowercased())")
+        } else {
+            parts.append(note.createdAt.formatted(date: .abbreviated, time: .shortened))
+        }
+        if let duration = note.formattedDuration {
+            parts.append(duration)
+        }
+        if note.wordCount > 0 {
+            parts.append(note.formattedWordCount)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Decisions double as “key points” in the list/preview UI.
+    private var keyPoints: [String] { note.decisions }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(note.title)
-                .font(.system(size: 26, weight: .regular, design: .serif))
-                .foregroundStyle(FlowTheme.ink)
-                .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(note.title)
+                        .font(.system(size: 26, weight: .regular, design: .serif))
+                        .foregroundStyle(FlowTheme.ink)
+                        .fixedSize(horizontal: false, vertical: true)
 
-            Text(relativeStamp(note.createdAt))
-                .font(.system(size: 12))
-                .foregroundStyle(FlowTheme.muted)
+                    Text(metaLine)
+                        .font(.system(size: 12))
+                        .foregroundStyle(FlowTheme.muted)
 
-            if !note.attendees.isEmpty {
-                Text(note.attendees.joined(separator: " · "))
-                    .font(.system(size: 12))
+                    if !note.attendees.isEmpty {
+                        Text(note.attendees.joined(separator: " · "))
+                            .font(.system(size: 12))
+                            .foregroundStyle(FlowTheme.muted)
+                            .lineLimit(3)
+                    }
+
+                    HStack(spacing: 8) {
+                        Button {
+                            showFull = true
+                        } label: {
+                            Text("Open Note")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(FlowTheme.ink)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(FlowTheme.card, in: Capsule())
+                                .overlay(Capsule().stroke(FlowTheme.hairline, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+
+                        if !note.actionItems.isEmpty {
+                            Button {
+                                showRemindersExport = true
+                            } label: {
+                                Label("Reminders", systemImage: "checklist")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(FlowTheme.ink)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 8)
+                                    .background(FlowTheme.card, in: Capsule())
+                                    .overlay(Capsule().stroke(FlowTheme.hairline, lineWidth: 1))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Send action items to a Reminders list")
+                        }
+                    }
+
+                    if !note.actionItems.isEmpty {
+                        previewBulletSection(
+                            title: "Action items",
+                            icon: "checklist",
+                            items: note.actionItems,
+                            limit: 5
+                        )
+                    }
+
+                    if !keyPoints.isEmpty {
+                        previewBulletSection(
+                            title: "Key points",
+                            icon: "lightbulb",
+                            items: keyPoints,
+                            limit: 5
+                        )
+                    }
+
+                    if !note.openQuestions.isEmpty {
+                        previewBulletSection(
+                            title: "Open questions",
+                            icon: "questionmark.circle",
+                            items: note.openQuestions,
+                            limit: 3
+                        )
+                    }
+
+                    if let brief = note.brief, !brief.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Brief")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text(brief)
+                                .font(.system(size: 13))
+                                .foregroundStyle(FlowTheme.ink.opacity(0.85))
+                                .lineLimit(5)
+                                .textSelection(.enabled)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Overview")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(note.summary.isEmpty ? "No summary yet." : note.summary)
+                            .font(.system(size: 13))
+                            .foregroundStyle(FlowTheme.ink.opacity(0.85))
+                            .lineLimit(note.actionItems.isEmpty && keyPoints.isEmpty ? 12 : 6)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .sheet(isPresented: $showFull) {
+            MeetingDetailView(note: note, reminders: reminders)
+                .frame(minWidth: 640, minHeight: 520)
+        }
+        .sheet(isPresented: $showRemindersExport) {
+            SendActionItemsToRemindersSheet(note: note, reminders: reminders)
+        }
+    }
+
+    private func previewBulletSection(
+        title: String,
+        icon: String,
+        items: [String],
+        limit: Int
+    ) -> some View {
+        let visible = Array(items.prefix(limit))
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(FlowTheme.muted)
-                    .lineLimit(3)
-            }
-
-            Button {
-                showFull = true
-            } label: {
-                Text("Open Note")
+                Text(title)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(FlowTheme.ink)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(FlowTheme.card, in: Capsule())
-                    .overlay(Capsule().stroke(FlowTheme.hairline, lineWidth: 1))
+                Spacer(minLength: 0)
+                Text("\(items.count)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(FlowTheme.ink.opacity(0.7))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(FlowTheme.accentSoft, in: Capsule())
             }
-            .buttonStyle(.plain)
 
-            if let brief = note.brief, !brief.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Brief:")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text(brief)
+            ForEach(Array(visible.enumerated()), id: \.offset) { _, item in
+                HStack(alignment: .top, spacing: 8) {
+                    Circle()
+                        .fill(FlowTheme.muted.opacity(0.55))
+                        .frame(width: 5, height: 5)
+                        .padding(.top, 6)
+                    Text(item)
                         .font(.system(size: 13))
-                        .foregroundStyle(FlowTheme.ink.opacity(0.85))
-                        .lineLimit(6)
+                        .foregroundStyle(FlowTheme.ink.opacity(0.9))
+                        .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
                 }
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Overview:")
-                    .font(.system(size: 13, weight: .semibold))
-                Text(note.summary.isEmpty ? "No summary yet." : note.summary)
-                    .font(.system(size: 13))
-                    .foregroundStyle(FlowTheme.ink.opacity(0.85))
-                    .lineLimit(12)
-                    .textSelection(.enabled)
+            if items.count > limit {
+                Text("+\(items.count - limit) more in note")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(FlowTheme.muted)
             }
-
-            Spacer(minLength: 0)
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .sheet(isPresented: $showFull) {
-            MeetingDetailView(note: note)
-                .frame(minWidth: 640, minHeight: 520)
-        }
-    }
-
-    private func relativeStamp(_ date: Date) -> String {
-        if Calendar.current.isDateInToday(date) {
-            return "Today · \(date.formatted(date: .omitted, time: .shortened).lowercased())"
-        }
-        return date.formatted(date: .abbreviated, time: .shortened)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(FlowTheme.card.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(FlowTheme.hairline, lineWidth: 1)
+        )
     }
 }
 
 struct MeetingDetailView: View {
     let note: MeetingNote
+    var reminders: RemindersService
     @Environment(\.dismiss) private var dismiss
+    @State private var showRemindersExport = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1957,11 +2225,11 @@ struct MeetingDetailView: View {
 
                     section("Overview", note.summary.isEmpty ? "No summary yet." : note.summary)
 
-                    if !note.decisions.isEmpty {
-                        bulletSection("Decisions", note.decisions)
-                    }
                     if !note.actionItems.isEmpty {
                         bulletSection("Action items", note.actionItems)
+                    }
+                    if !note.decisions.isEmpty {
+                        bulletSection("Key points", note.decisions)
                     }
                     if !note.openQuestions.isEmpty {
                         bulletSection("Open questions", note.openQuestions)
@@ -2000,6 +2268,11 @@ struct MeetingDetailView: View {
                     NSPasteboard.general.setString(note.markdownExport, forType: .string)
                 }
                 Button("Export…") { exportMarkdown() }
+                if !note.actionItems.isEmpty {
+                    Button("Send to Reminders…") {
+                        showRemindersExport = true
+                    }
+                }
                 Spacer()
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction)
@@ -2009,6 +2282,9 @@ struct MeetingDetailView: View {
             .background(FlowTheme.cream.opacity(0.9))
         }
         .background(FlowTheme.cream)
+        .sheet(isPresented: $showRemindersExport) {
+            SendActionItemsToRemindersSheet(note: note, reminders: reminders)
+        }
     }
 
     private func section(_ title: String, _ body: String) -> some View {
@@ -2038,6 +2314,145 @@ struct MeetingDetailView: View {
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             try? note.markdownExport.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+}
+
+private struct SendActionItemsToRemindersSheet: View {
+    let note: MeetingNote
+    @Bindable var reminders: RemindersService
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var selectedListID: String?
+    @State private var statusMessage: String?
+    @State private var isBusy = false
+    @State private var didSucceed = false
+
+    private var itemCount: Int { note.actionItems.count }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Send to Reminders")
+                .font(.system(size: 20, weight: .semibold))
+
+            Text("Add \(itemCount) action item\(itemCount == 1 ? "" : "s") from “\(note.title)” to a list.")
+                .font(.system(size: 13))
+                .foregroundStyle(FlowTheme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !reminders.isAuthorized {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Fn Dictate needs access to Reminders.")
+                        .font(.system(size: 13))
+                    Button("Allow Reminders Access") {
+                        Task {
+                            let granted = await reminders.requestAccess()
+                            if granted {
+                                selectedListID = reminders.resolvedListID()
+                                statusMessage = nil
+                            } else {
+                                statusMessage = RemindersServiceError.notAuthorized.localizedDescription
+                            }
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            } else if reminders.lists.isEmpty {
+                Text(RemindersServiceError.noWritableLists.localizedDescription)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.red)
+            } else {
+                Picker("List", selection: Binding(
+                    get: { selectedListID ?? reminders.resolvedListID() ?? "" },
+                    set: { selectedListID = $0 }
+                )) {
+                    ForEach(reminders.lists) { list in
+                        Text(list.title).tag(list.id)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(note.actionItems.prefix(6).enumerated()), id: \.offset) { _, item in
+                        Text("• \(item)")
+                            .font(.system(size: 12))
+                            .foregroundStyle(FlowTheme.ink.opacity(0.85))
+                            .lineLimit(2)
+                    }
+                    if note.actionItems.count > 6 {
+                        Text("+\(note.actionItems.count - 6) more")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(FlowTheme.muted)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(FlowTheme.card.opacity(0.7), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(FlowTheme.hairline, lineWidth: 1)
+                )
+            }
+
+            if let statusMessage {
+                Text(statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(didSucceed ? .green : .red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                if reminders.isAuthorized, !reminders.lists.isEmpty {
+                    Button(didSucceed ? "Done" : "Add to Reminders") {
+                        if didSucceed {
+                            dismiss()
+                        } else {
+                            send()
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(isBusy || (selectedListID ?? reminders.resolvedListID()) == nil)
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 420)
+        .background(FlowTheme.cream)
+        .task {
+            reminders.refreshStatus()
+            if reminders.isAuthorized {
+                reminders.reloadLists()
+                selectedListID = reminders.resolvedListID()
+            } else {
+                let granted = await reminders.requestAccess()
+                if granted {
+                    selectedListID = reminders.resolvedListID()
+                }
+            }
+        }
+    }
+
+    private func send() {
+        guard let listID = selectedListID ?? reminders.resolvedListID() else { return }
+        isBusy = true
+        statusMessage = nil
+        defer { isBusy = false }
+        do {
+            let count = try reminders.addActionItems(
+                note.actionItems,
+                toListID: listID,
+                meetingTitle: note.title
+            )
+            let listTitle = reminders.lists.first(where: { $0.id == listID })?.title ?? "Reminders"
+            didSucceed = true
+            statusMessage = "Added \(count) reminder\(count == 1 ? "" : "s") to \(listTitle)."
+        } catch {
+            didSucceed = false
+            statusMessage = error.localizedDescription
         }
     }
 }

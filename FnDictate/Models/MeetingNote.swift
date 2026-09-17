@@ -105,6 +105,48 @@ struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
         catchUp = try c.decodeIfPresent(String.self, forKey: .catchUp)
     }
 
+    /// Recording length when `endedAt` is known; otherwise nil (still in progress / incomplete).
+    var duration: TimeInterval? {
+        guard let endedAt else { return nil }
+        let seconds = endedAt.timeIntervalSince(createdAt)
+        return seconds > 0 ? seconds : nil
+    }
+
+    var formattedDuration: String? {
+        guard let duration else { return nil }
+        let totalSeconds = Int(duration.rounded())
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+        if minutes > 0 {
+            return seconds > 0 ? "\(minutes)m \(seconds)s" : "\(minutes) min"
+        }
+        return "\(max(seconds, 1))s"
+    }
+
+    /// Prefer segment text; fall back to the flat transcript.
+    var wordCount: Int {
+        let body: String
+        if !segments.isEmpty {
+            body = segments.map(\.text).joined(separator: " ")
+        } else {
+            body = transcript
+        }
+        return body.split { $0.isWhitespace || $0.isNewline }.count
+    }
+
+    var formattedWordCount: String {
+        let count = wordCount
+        if count >= 1_000 {
+            let k = Double(count) / 1_000.0
+            return String(format: k >= 10 ? "%.0fk words" : "%.1fk words", k)
+        }
+        return "\(count) word\(count == 1 ? "" : "s")"
+    }
+
     var labeledTranscript: String {
         if !segments.isEmpty {
             return segments
@@ -143,15 +185,15 @@ struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
         lines.append(summary.isEmpty ? "_No summary yet._" : summary)
         lines.append("")
 
-        if !decisions.isEmpty {
-            lines.append("## Decisions")
-            lines.append(contentsOf: decisions.map { "- \($0)" })
-            lines.append("")
-        }
-
         if !actionItems.isEmpty {
             lines.append("## Action items")
             lines.append(contentsOf: actionItems.map { "- [ ] \($0)" })
+            lines.append("")
+        }
+
+        if !decisions.isEmpty {
+            lines.append("## Key points")
+            lines.append(contentsOf: decisions.map { "- \($0)" })
             lines.append("")
         }
 

@@ -19,7 +19,7 @@ struct ListeningPillView: View {
                 )
                 .frame(maxWidth: .infinity, minHeight: 28, maxHeight: 48, alignment: .topLeading)
 
-                if model.phase == .listening {
+                if model.phase == .listening, model.currentTone != .raw {
                     ToneChipButton(tone: model.currentTone) {
                         model.cycleTone()
                     }

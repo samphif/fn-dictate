@@ -36,5 +36,9 @@
 	<string>Fn Dictate reads your calendar to name speakers, title meetings, and prepare pre-meeting briefs. Events stay on your Mac.</string>
 	<key>NSCalendarsUsageDescription</key>
 	<string>Fn Dictate reads your calendar to name speakers, title meetings, and prepare pre-meeting briefs. Events stay on your Mac.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Fn Dictate can add meeting action items to Reminders when you choose to export them. Items stay on your Mac.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>Fn Dictate can add meeting action items to Reminders when you choose to export them. Items stay on your Mac.</string>
 </dict>
 </plist>

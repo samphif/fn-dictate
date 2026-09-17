@@ -244,13 +244,15 @@ struct MeetingIntelligence: Sendable {
         TITLE: <short title>
         SUMMARY: <1-3 paragraph overview>
         DECISIONS:
-        - <decision>
+        - <key point or decision>
         ACTIONS:
         - <action item with owner when known>
         QUESTIONS:
         - <open question>
         TRANSCRIPT:
         <full refined labeled transcript, one utterance per line as [Speaker] text>
+
+        Prefer concrete key points in DECISIONS (outcomes, agreements, important facts), not filler.
 
         Transcript:
         \(labeled)

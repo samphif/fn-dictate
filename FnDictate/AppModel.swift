@@ -60,6 +60,7 @@ final class AppModel {
     let meetings = MeetingStore()
     let dictionary = DictionaryStore()
     let calendar = CalendarMeetingService()
+    let reminders = RemindersService()
 
     /// When on, watches the focused field after paste and learns spelling fixes made in-app.
     var learnFromInAppCorrections: Bool = true {
@@ -107,9 +108,10 @@ final class AppModel {
         NSApp.activate(ignoringOtherApps: true)
 
         if let existing = NSApp.windows.first(where: {
-            $0.title == "Library" || $0.identifier?.rawValue == "library"
+            $0.identifier?.rawValue == Self.libraryWindowIdentifier
         }) {
             libraryWindow = existing
+            existing.identifier = NSUserInterfaceItemIdentifier(Self.libraryWindowIdentifier)
             existing.isReleasedWhenClosed = false
             existing.makeKeyAndOrderFront(nil)
             existing.orderFrontRegardless()
@@ -124,7 +126,8 @@ final class AppModel {
 
         let hosting = NSHostingController(rootView: LibraryView(model: self))
         let window = NSWindow(contentViewController: hosting)
-        window.title = "Library"
+        window.identifier = NSUserInterfaceItemIdentifier(Self.libraryWindowIdentifier)
+        window.title = LibraryView.LibrarySection.dictations.help
         window.setContentSize(NSSize(width: 1120, height: 720))
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setFrameAutosaveName("FnDictate.Library")
@@ -134,6 +137,8 @@ final class AppModel {
         window.orderFrontRegardless()
         libraryWindow = window
     }
+
+    static let libraryWindowIdentifier = "library"
 
     func bootstrap() {
         guard !didBootstrap else { return }
@@ -504,7 +509,16 @@ final class AppModel {
         correctionWatcher.start(
             pasted: pasted,
             targetApp: targetApp,
-            historyEntryID: historyEntryID
+            historyEntryID: historyEntryID,
+            onFailedToAttach: { [weak self] in
+                guard let self else { return }
+                // Electron apps (esp. Cursor) often hide the chat field from AX.
+                self.statusMessage = "Can't see field — ⌘A ⌘C after edits, or fix in Library"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+                    guard self?.phase == .idle else { return }
+                    self?.statusMessage = self?.idleStatus ?? "Hold Fn · double-tap hands-free"
+                }
+            }
         ) { [weak self] result in
             guard let self else { return }
             self.handleInAppCorrection(pasted: pasted, result: result)
@@ -514,6 +528,9 @@ final class AppModel {
     private func handleInAppCorrection(pasted: String, result: InAppCorrectionWatcher.Result) {
         let corrected = result.correctedPaste
         guard corrected != pasted else { return }
+        // Belt-and-suspenders: never revise history from Cursor UI chrome / unrelated AX reads.
+        guard InAppCorrectionWatcher.isPlausibleCorrection(pasted: pasted, corrected: corrected)
+        else { return }
 
         let learned = dictionary.learn(from: pasted, to: corrected)
 
@@ -573,7 +590,7 @@ final class AppModel {
             ?? "Meeting \(Date().formatted(date: .abbreviated, time: .shortened))"
         let attendees = cal?.attendees ?? []
 
-        var note = MeetingNote(
+        let note = MeetingNote(
             title: title,
             includeSystemAudio: includeSystemAudioInMeetings,
             attendees: attendees,

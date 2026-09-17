@@ -29,9 +29,8 @@ struct TranscriptEntry: Identifiable, Codable, Equatable, Sendable {
         self.appBundleID = appBundleID
     }
 
-    /// True when this entry was edited and the pre-edit ASR text is still available.
+    /// True when the user (or in-app correction watcher) edited this after paste.
     var isRevised: Bool {
-        guard let originalText else { return false }
-        return originalText != text
+        updatedAt != nil
     }
 }

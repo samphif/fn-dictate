@@ -17,11 +17,16 @@ enum TextPaster {
     }
 
     /// Bring `app` forward so ⌘V lands in the field the user was editing.
+    @MainActor
     @discardableResult
     static func activate(_ app: NSRunningApplication?) -> Bool {
         guard let app, !app.isTerminated else { return false }
         if app.bundleIdentifier == Bundle.main.bundleIdentifier { return false }
-        return app.activate(options: [.activateIgnoringOtherApps])
+        // Cooperative activation (macOS 14+): yield if we're frontmost, then request activate.
+        if NSApp.isActive {
+            NSApp.yieldActivation(to: app)
+        }
+        return app.activate()
     }
 
     static func paste(_ text: String) {

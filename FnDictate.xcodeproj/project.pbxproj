@@ -12,6 +12,7 @@
 		15A4DE0A46C35758B01484DC /* SystemAudioCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = B81BCA571592FB75B2FF31A0 /* SystemAudioCapture.swift */; };
 		1D59A2A442086FD53E113CFD /* DictionaryEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = E35CFEC96EFC3F18D4CA5CDC /* DictionaryEntry.swift */; };
 		2970BF6B368CB6B9B0EA8011 /* CalendarMeetingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5C2C9F17F2004F498D29F1D /* CalendarMeetingService.swift */; };
+		2A8F1C4E9B7D3E6A0C5F2D81 /* RemindersService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B7E4A90D2C6F8E3A5B9C041 /* RemindersService.swift */; };
 		2DDFC9C258A298F7392CE310 /* MeetingPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4E2430EBF0A5B86FE22A5BB /* MeetingPromptView.swift */; };
 		3354EDBE673C5AB3E2B9C478 /* MeetingHotKeyMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 923EDA369CEA62C62DDBD8F5 /* MeetingHotKeyMonitor.swift */; };
 		36341E00F61038C6EF95D939 /* MenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2333BDF8F32822407672E79 /* MenuBarView.swift */; };
@@ -46,6 +47,7 @@
 		04ABA22528EBDE7956A6DD12 /* TextPaster.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextPaster.swift; sourceTree = "<group>"; };
 		04C504FBFF1446775A514336 /* MeetingAgentExport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingAgentExport.swift; sourceTree = "<group>"; };
 		08A29ADC63A50C843FD22938 /* TextCleaner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextCleaner.swift; sourceTree = "<group>"; };
+		1B7E4A90D2C6F8E3A5B9C041 /* RemindersService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemindersService.swift; sourceTree = "<group>"; };
 		21C0B2C84E2D2F6F3B070746 /* MeetingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeetingStore.swift; sourceTree = "<group>"; };
 		24C7BAE0D8BD854D20D2202F /* TranscriptEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptEntry.swift; sourceTree = "<group>"; };
 		29986F868DD7057FEBEBC168 /* DictionaryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictionaryStore.swift; sourceTree = "<group>"; };
@@ -155,6 +157,7 @@
 				21C0B2C84E2D2F6F3B070746 /* MeetingStore.swift */,
 				EB0CE8B6CEEB54407DFCDE41 /* MicrophoneCapture.swift */,
 				D04E58DAD5310248AF010402 /* PermissionManager.swift */,
+				1B7E4A90D2C6F8E3A5B9C041 /* RemindersService.swift */,
 				A309D34B51677E20DDB0A401 /* Sequence+Uniqued.swift */,
 				A966A1EA8331AB1B3BF6264C /* SpeechTranscriptionService.swift */,
 				B81BCA571592FB75B2FF31A0 /* SystemAudioCapture.swift */,
@@ -193,7 +196,7 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 1430;
+				LastUpgradeCheck = 2700;
 				TargetAttributes = {
 					AE5F1FD132FA1855409D2585 = {
 						ProvisioningStyle = Automatic;
@@ -259,6 +262,7 @@
 				D738FD9E91F58795CC9EFB37 /* MicrophoneCapture.swift in Sources */,
 				3EF344A861028C272C1DC06D /* OnboardingView.swift in Sources */,
 				E4D551000366A5DF39D58F21 /* PermissionManager.swift in Sources */,
+				2A8F1C4E9B7D3E6A0C5F2D81 /* RemindersService.swift in Sources */,
 				14CFBA65283F82B123545493 /* Sequence+Uniqued.swift in Sources */,
 				FFFE7B203E67FA1D3EC50C45 /* SpeechTranscriptionService.swift in Sources */,
 				15A4DE0A46C35758B01484DC /* SystemAudioCapture.swift in Sources */,
@@ -306,9 +310,11 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -329,6 +335,7 @@
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 6.0;
@@ -369,9 +376,11 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -385,6 +394,7 @@
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 6.0;
@@ -398,6 +408,7 @@
 				CODE_SIGN_ENTITLEMENTS = FnDictate/Resources/FnDictate.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = FnDictate/Resources/Info.plist;
@@ -415,6 +426,7 @@
 				CODE_SIGN_ENTITLEMENTS = FnDictate/Resources/FnDictate.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = FnDictate/Resources/Info.plist;
