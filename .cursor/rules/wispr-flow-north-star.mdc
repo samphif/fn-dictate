@@ -1,0 +1,28 @@
+---
+description: Treat Wispr Flow as the product north star for dictation, paste, and cleanup.
+alwaysApply: true
+---
+
+# Wispr Flow north star
+
+Fn Dictate is a local-first take on Wispr Flow. Before changing dictation, paste, cleanup, UI, or shortcuts, ask: **what would Wispr Flow do?** If a Wispr user would be surprised, don't ship it.
+
+## Cleanup is an edit, never a generation
+
+- Default is **Light**: fillers + grammar. Not a rewrite, not an outline.
+- **Never invent content.** Expansion is user-defined snippets, not Auto Cleanup.
+- Skip the model on **very short or very long** dictation; paste near-raw (`CleanupFidelity`).
+- Lists only when the speaker used sequence words (`one/two`, `first/second`).
+- Light keeps the speaker's wording. Polished may reword for concision but stays the same length or shorter.
+- On-demand transforms (Polish this) are separate from silent paste-time cleanup.
+
+```
+❌ "This seems interesting." → invented bullets / "further details may follow"
+✅ "This seems interesting."
+```
+
+## Product feel
+
+- Hold-to-talk → release → paste. Keep the rail, paste, and history as quiet as Wispr.
+- Prefer conservative defaults (Light, skip-short) over "helpful" structure.
+- Keep an Undo cleanup path back to the raw transcript.

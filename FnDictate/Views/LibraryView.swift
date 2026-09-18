@@ -778,6 +778,17 @@ struct LibraryView: View {
                 }
                 .buttonStyle(.borderless)
 
+                if let raw = entry.originalText?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                   !raw.isEmpty,
+                   draftText != raw
+                {
+                    Button("Undo cleanup") {
+                        draftText = raw
+                    }
+                    .buttonStyle(.borderless)
+                }
+
                 Spacer()
 
                 Button("Save") {
@@ -847,9 +858,10 @@ struct LibraryView: View {
         let source = draftText
         let tone = model.effectiveTone(bundleID: entry.appBundleID, name: entry.appName)
 
-        if tone == .raw {
+        let basic = TextCleaner.basicCleanup(source)
+        if tone == .raw || !CleanupFidelity.shouldUseModel(basic) {
             formattedPreviewBusy = false
-            formattedPreview = TextCleaner.basicCleanup(source)
+            formattedPreview = basic
             return
         }
 
@@ -995,7 +1007,7 @@ struct LibraryView: View {
                     .foregroundStyle(FlowTheme.ink)
                     .padding(.top, 8)
 
-                Text("How much cleanup runs before paste into each app. Raw keeps wording nearly as spoken; Light fixes punctuation; Polished rewrites into clear prose.")
+                Text("How much cleanup runs before paste into each app. Raw is near-verbatim; Light removes fillers and fixes punctuation; Polished may reword for clarity but never invents content. Very short dictations skip the model.")
                     .font(.system(size: 13))
                     .foregroundStyle(FlowTheme.muted)
                     .fixedSize(horizontal: false, vertical: true)
