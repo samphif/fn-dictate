@@ -119,6 +119,11 @@ final class MeetingDetector {
         snoozedFamiliesUntil.removeValue(forKey: family)
     }
 
+    /// One-shot detection for tagging a recording (ignores dismiss/snooze/streak).
+    func snapshot() -> DetectedMeeting? {
+        detectMeeting(from: NSWorkspace.shared.runningApplications)
+    }
+
     private func observeWorkspace() {
         let center = NSWorkspace.shared.notificationCenter
         let names: [NSNotification.Name] = [
@@ -260,10 +265,12 @@ final class MeetingDetector {
             }
             if title.localizedCaseInsensitiveContains("Zoom Meeting")
                 || title.localizedCaseInsensitiveContains("Zoom Webinar")
+                || Self.looksLikeBrowserZoom(title)
             {
+                let bid = bundleID(forPID: window.ownerPID) ?? "us.zoom.xos"
                 return DetectedMeeting(
                     appName: "Zoom",
-                    bundleID: ownerBundleID ?? "us.zoom.xos",
+                    bundleID: bid,
                     detail: title
                 )
             }
@@ -361,6 +368,19 @@ final class MeetingDetector {
         if lower.contains(" | meeting") || lower.contains("meeting |") { return true }
         if lower.contains("/meetup-join") || lower.contains("meetup-join") { return true }
         return false
+    }
+
+    private static func looksLikeBrowserZoom(_ title: String) -> Bool {
+        let lower = title.lowercased()
+        return lower.contains("zoom.us/")
+            || lower.contains("zoom.com/")
+            || (lower.contains("zoom") && lower.contains("meeting") && (
+                lower.contains("chrome")
+                    || lower.contains("edge")
+                    || lower.contains("safari")
+                    || lower.contains("firefox")
+                    || lower.contains("brave")
+            ))
     }
 
     private static func appFamily(for bundleID: String, appName: String?) -> String {

@@ -17,6 +17,8 @@ enum MeetingAgentExport {
     }
 
     static func refresh(notes: [MeetingNote]) {
+        let projects = ProjectStore.loadSnapshot()
+        let names = Dictionary(uniqueKeysWithValues: projects.map { ($0.id, $0) })
         let fm = FileManager.default
         // Clear stale markdown files.
         if let existing = try? fm.contentsOfDirectory(at: meetingsDirectory, includingPropertiesForKeys: nil) {
@@ -31,6 +33,8 @@ enum MeetingAgentExport {
             let createdAt: Date
             let endedAt: Date?
             let attendees: [String]
+            let source: String?
+            let project: String?
             let path: String
             let summary: String
         }
@@ -41,7 +45,11 @@ enum MeetingAgentExport {
         for note in notes {
             let filename = "\(note.id.uuidString).md"
             let fileURL = meetingsDirectory.appendingPathComponent(filename)
-            try? note.markdownExport.write(to: fileURL, atomically: true, encoding: .utf8)
+            let project = note.projectID.flatMap { names[$0] }
+            try? note.markdownExport(
+                projectName: project?.name,
+                fallbackSource: project?.usualSource
+            ).write(to: fileURL, atomically: true, encoding: .utf8)
             index.append(
                 IndexEntry(
                     id: note.id.uuidString,
@@ -49,6 +57,8 @@ enum MeetingAgentExport {
                     createdAt: note.createdAt,
                     endedAt: note.endedAt,
                     attendees: note.attendees,
+                    source: note.sourceDisplayLabel ?? project?.usualSource,
+                    project: project?.name,
                     path: "meetings/\(filename)",
                     summary: note.summary
                 )

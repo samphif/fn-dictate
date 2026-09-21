@@ -67,10 +67,54 @@ final class MeetingStore {
         save(exportAgent: false)
     }
 
+    func updateSegment(
+        meetingID: UUID,
+        segmentID: UUID,
+        text: String,
+        speaker: String,
+        voiceID: UUID?
+    ) {
+        guard let noteIndex = notes.firstIndex(where: { $0.id == meetingID }),
+              let segmentIndex = notes[noteIndex].segments.firstIndex(where: { $0.id == segmentID })
+        else { return }
+        notes[noteIndex].segments[segmentIndex].text = text
+        notes[noteIndex].segments[segmentIndex].speaker = speaker
+        notes[noteIndex].segments[segmentIndex].voiceID = voiceID
+        notes[noteIndex].transcript = notes[noteIndex].labeledTranscript
+        save(exportAgent: false)
+    }
+
+    func renameVoice(id: UUID, to name: String) {
+        var changed = false
+        for noteIndex in notes.indices {
+            var noteChanged = false
+            for segmentIndex in notes[noteIndex].segments.indices
+            where notes[noteIndex].segments[segmentIndex].voiceID == id {
+                notes[noteIndex].segments[segmentIndex].speaker = name
+                noteChanged = true
+            }
+            if noteChanged {
+                notes[noteIndex].transcript = notes[noteIndex].labeledTranscript
+                changed = true
+            }
+        }
+        if changed {
+            save()
+        }
+    }
+
     func updateCatchUp(id: UUID, text: String) {
         guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
         notes[index].catchUp = text
         save(exportAgent: false)
+    }
+
+    func updateActionItem(id: UUID, index: Int, text: String) {
+        guard let noteIndex = notes.firstIndex(where: { $0.id == id }),
+              notes[noteIndex].actionItems.indices.contains(index)
+        else { return }
+        notes[noteIndex].actionItems[index] = text
+        save()
     }
 
     func delete(_ note: MeetingNote) {
@@ -81,7 +125,20 @@ final class MeetingStore {
     private func load() {
         guard let data = try? Data(contentsOf: url) else { return }
         notes = (try? JSONDecoder().decode([MeetingNote].self, from: data)) ?? []
-        MeetingAgentExport.refresh(notes: notes)
+        var changed = false
+        for index in notes.indices {
+            let collapsed = TranscriptSimilarity.collapsingChannelEchoes(notes[index].segments)
+            if collapsed != notes[index].segments {
+                notes[index].segments = collapsed
+                notes[index].transcript = notes[index].labeledTranscript
+                changed = true
+            }
+        }
+        if changed {
+            save()
+        } else {
+            MeetingAgentExport.refresh(notes: notes)
+        }
     }
 
     private func save(exportAgent: Bool = true) {

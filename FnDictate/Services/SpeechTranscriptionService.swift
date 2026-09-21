@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreMedia
 import Foundation
 import Speech
 
@@ -20,14 +21,15 @@ actor SpeechTranscriptionService {
     private var sessionStartedAt: ContinuousClock.Instant?
 
     private var onPartialUpdate: (@Sendable (String) -> Void)?
-    /// Fired when a segment is finalized: (text, seconds from session start).
-    private var onFinalSegment: (@Sendable (String, TimeInterval) -> Void)?
+    /// Fired when a segment is finalized: text, seconds from session start, voice fingerprint.
+    private var onFinalSegment: (@Sendable (String, TimeInterval, [Float]?) -> Void)?
+    private var audioTimeline = VoiceAudioTimeline()
 
     func setPartialHandler(_ handler: (@Sendable (String) -> Void)?) {
         onPartialUpdate = handler
     }
 
-    func setFinalSegmentHandler(_ handler: (@Sendable (String, TimeInterval) -> Void)?) {
+    func setFinalSegmentHandler(_ handler: (@Sendable (String, TimeInterval, [Float]?) -> Void)?) {
         onFinalSegment = handler
     }
 
@@ -49,6 +51,7 @@ actor SpeechTranscriptionService {
         partialTranscript = ""
         finalizedSegments = []
         sessionStartedAt = ContinuousClock.now
+        audioTimeline.reset()
 
         let locale = await preferredLocale()
         let module = SpeechTranscriber(locale: locale, preset: .progressiveTranscription)
@@ -88,9 +91,7 @@ actor SpeechTranscriptionService {
             guard let self else { return }
             do {
                 for try await result in module.results {
-                    let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !text.isEmpty else { continue }
-                    await self.handleResult(text: text, isFinal: result.isFinal)
+                    await self.handleResult(result)
                 }
             } catch {
                 // Session ended or cancelled.
@@ -112,10 +113,12 @@ actor SpeechTranscriptionService {
 
         if let preparedFormat, buffer.format != preparedFormat {
             guard let converted = convert(buffer, to: preparedFormat) else { return }
+            audioTimeline.append(converted)
             continuation.yield(AnalyzerInput(buffer: converted))
             return
         }
 
+        audioTimeline.append(buffer)
         continuation.yield(AnalyzerInput(buffer: buffer))
     }
 
@@ -141,6 +144,7 @@ actor SpeechTranscriptionService {
         transcriber = nil
         partialTranscript = ""
         finalizedSegments = []
+        audioTimeline.reset()
         return combined
     }
 
@@ -156,13 +160,17 @@ actor SpeechTranscriptionService {
         transcriber = nil
         partialTranscript = ""
         finalizedSegments = []
+        audioTimeline.reset()
     }
 
-    private func handleResult(text: String, isFinal: Bool) {
-        if isFinal {
+    private func handleResult(_ result: SpeechTranscriber.Result) {
+        let text = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        if result.isFinal {
             finalizedSegments.append(text)
             partialTranscript = ""
-            onFinalSegment?(text, elapsedSinceStart())
+            let start = speechStart(of: result)
+            onFinalSegment?(text, start, voiceprint(for: result, text: text))
         } else {
             partialTranscript = text
         }
@@ -172,6 +180,31 @@ actor SpeechTranscriptionService {
             .filter { !$0.isEmpty }
             .joined(separator: " ")
         onPartialUpdate?(combined)
+    }
+
+    private func speechStart(of result: SpeechTranscriber.Result) -> TimeInterval {
+        let start = CMTimeGetSeconds(result.range.start)
+        if start.isFinite, start >= 0 {
+            return start
+        }
+        return elapsedSinceStart()
+    }
+
+    private func voiceprint(for result: SpeechTranscriber.Result, text: String) -> [Float]? {
+        let start = CMTimeGetSeconds(result.range.start)
+        let duration = CMTimeGetSeconds(result.range.duration)
+        if start.isFinite, duration.isFinite, duration > 0 {
+            let capped = min(duration, 4)
+            let sliceStart = start + max(0, duration - capped)
+            if let slice = audioTimeline.slice(start: sliceStart, duration: capped),
+               let print = Voiceprint.make(samples: slice.samples, sampleRate: slice.sampleRate) {
+                return print
+            }
+        }
+        let words = max(1, text.split(whereSeparator: \.isWhitespace).count)
+        let seconds = min(8, max(0.8, Double(words) * 0.45))
+        guard let tail = audioTimeline.tail(seconds: seconds) else { return nil }
+        return Voiceprint.make(samples: tail.samples, sampleRate: tail.sampleRate)
     }
 
     private func elapsedSinceStart() -> TimeInterval {
@@ -220,5 +253,68 @@ actor SpeechTranscriptionService {
 
         guard status != .error, error == nil else { return nil }
         return output
+    }
+}
+
+/// Recent mono audio for the analyzer's own clock, so a finalized phrase can be fingerprinted.
+private struct VoiceAudioTimeline {
+    private var samples: [Float] = []
+    private var sampleRate: Double = 16_000
+    /// Session time of `samples[0]`.
+    private var origin: TimeInterval = 0
+
+    mutating func reset() {
+        samples.removeAll(keepingCapacity: true)
+        origin = 0
+    }
+
+    mutating func append(_ buffer: AVAudioPCMBuffer) {
+        let rate = buffer.format.sampleRate
+        let frames = Int(buffer.frameLength)
+        guard frames > 0, rate > 0 else { return }
+        if !samples.isEmpty, abs(sampleRate - rate) > 1 {
+            reset()
+        }
+        sampleRate = rate
+        let mono = Self.monoFloats(buffer)
+        guard mono.count == frames else { return }
+        samples.append(contentsOf: mono)
+        let maxCount = Int(rate * 25)
+        if samples.count > maxCount {
+            let drop = samples.count - maxCount
+            samples.removeFirst(drop)
+            origin += Double(drop) / rate
+        }
+    }
+
+    func slice(start: TimeInterval, duration: TimeInterval) -> (samples: [Float], sampleRate: Double)? {
+        guard sampleRate > 0, duration > 0.2 else { return nil }
+        let from = Int((start - origin) * sampleRate)
+        let to = Int((start + duration - origin) * sampleRate)
+        let lower = max(0, from)
+        let upper = min(samples.count, to)
+        let requested = Int(duration * sampleRate)
+        guard upper - lower >= max(Int(sampleRate * 0.35), requested / 2) else { return nil }
+        return (Array(samples[lower..<upper]), sampleRate)
+    }
+
+    func tail(seconds: TimeInterval) -> (samples: [Float], sampleRate: Double)? {
+        guard sampleRate > 0 else { return nil }
+        let count = min(samples.count, Int(sampleRate * seconds))
+        guard count >= Int(sampleRate * 0.35) else { return nil }
+        return (Array(samples.suffix(count)), sampleRate)
+    }
+
+    private static func monoFloats(_ buffer: AVAudioPCMBuffer) -> [Float] {
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return [] }
+        if let channels = buffer.floatChannelData {
+            return Array(UnsafeBufferPointer(start: channels[0], count: frames))
+        }
+        if let channels = buffer.int16ChannelData {
+            let channel = channels[0]
+            return (0..<frames).map { Float(channel[$0]) / 32_768 }
+        }
+        return []
     }
 }
