@@ -1,3 +1,4 @@
+import AppKit
 import EventKit
 import Foundation
 import Observation
@@ -46,7 +47,25 @@ final class RemindersService {
     }
 
     var isAuthorized: Bool {
-        authorizationStatus == .fullAccess
+        switch authorizationStatus {
+        case .fullAccess:
+            return true
+        case .authorized:
+            // Legacy status from older OS / SDK mappings.
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Already denied/restricted — must change in System Settings.
+    var needsOpenSettings: Bool {
+        switch authorizationStatus {
+        case .denied, .restricted:
+            return true
+        default:
+            return false
+        }
     }
 
     private let store = EKEventStore()
@@ -74,14 +93,30 @@ final class RemindersService {
             reloadLists()
             return true
         }
+        // Denied/restricted: calling request again never shows UI — open Settings instead.
+        if needsOpenSettings {
+            return false
+        }
         do {
             let granted = try await store.requestFullAccessToReminders()
             refreshStatus()
-            if granted { reloadLists() }
-            return granted
+            if granted || isAuthorized { reloadLists() }
+            return granted || isAuthorized
         } catch {
             refreshStatus()
-            return false
+            return isAuthorized
+        }
+    }
+
+    func openRemindersSettings() {
+        let candidates = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Reminders",
+        ]
+        for string in candidates {
+            if let url = URL(string: string), NSWorkspace.shared.open(url) {
+                return
+            }
         }
     }
 
@@ -120,9 +155,12 @@ final class RemindersService {
         refreshStatus()
         guard isAuthorized else { throw RemindersServiceError.notAuthorized }
 
-        let trimmed = items
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        let trimmed = items.compactMap { raw -> String? in
+            let parsed = ParsedActionItem.parse(raw)
+            guard !parsed.isDone else { return nil }
+            let title = ParsedActionItem.strippingDoneMarker(raw)
+            return title.isEmpty ? nil : title
+        }
         guard !trimmed.isEmpty else { throw RemindersServiceError.emptyItems }
 
         guard let calendar = store.calendars(for: .reminder)

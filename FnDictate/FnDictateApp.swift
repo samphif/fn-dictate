@@ -1,3 +1,4 @@
+import AppIntents
 import AppKit
 import SwiftUI
 
@@ -78,5 +79,52 @@ struct FnDictateApp: App {
         }
         .windowResizability(.contentSize)
         .defaultLaunchBehavior(.suppressed)
+    }
+}
+
+/// Siri tool: take the spoken phrase and insert it into the field that was focused
+/// before Siri opened. Siri’s own composer does not type into the page underneath.
+struct InsertTextIntent: AppIntent {
+    static let title: LocalizedStringResource = "Insert Text"
+    static let description = IntentDescription(
+        "Paste text into the app and text field you were using before Siri opened."
+    )
+    static let supportedModes: IntentModes = .background
+    static let openAppWhenRun = false
+    static let isDiscoverable = true
+
+    @Parameter(title: "Text", requestValueDialog: IntentDialog("What should I insert?"))
+    var text: String
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("Insert \(\.$text)")
+    }
+
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        let spoken = text
+        let dialog = await insert(spoken)
+        return .result(dialog: IntentDialog(LocalizedStringResource(stringLiteral: dialog)))
+    }
+
+    @MainActor
+    private func insert(_ spoken: String) async -> String {
+        guard let model = (NSApp.delegate as? AppDelegate)?.model else {
+            return "Fn Dictate isn’t running."
+        }
+        return await model.insertTextFromSiri(spoken)
+    }
+}
+
+struct FnDictateShortcuts: AppShortcutsProvider {
+    static var appShortcuts: [AppShortcut] {
+        AppShortcut(
+            intent: InsertTextIntent(),
+            phrases: [
+                "Insert text with \(.applicationName)",
+                "Paste into the field with \(.applicationName)",
+            ],
+            shortTitle: "Insert text",
+            systemImageName: "text.insert"
+        )
     }
 }

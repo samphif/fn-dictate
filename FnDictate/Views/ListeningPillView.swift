@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 
+/// Wispr-style vertical listening rail: cancel · waveform · confirm, docked to the side.
 struct ListeningPillView: View {
     @Bindable var model: AppModel
 
@@ -9,15 +10,57 @@ struct ListeningPillView: View {
     }
 
     var body: some View {
-        Group {
-            if model.listeningPillCollapsed {
-                collapsedBody
-            } else {
-                expandedBody
+        VStack(spacing: 14) {
+            Button {
+                model.cancelListeningPill()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Color.white.opacity(0.14)))
             }
+            .buttonStyle(.plain)
+            .help(cancelHelp)
+
+            ZStack {
+                WindowDragHandle(onClick: nil)
+                SideWaveformView(
+                    level: model.audioLevel,
+                    isActive: isLive,
+                    tint: indicatorColor
+                )
+                .frame(width: 22, height: 72)
+                .allowsHitTesting(false)
+            }
+            .frame(width: 28, height: 72)
+            .help("Listening — drag to move")
+
+            Button {
+                model.confirmListeningPill()
+            } label: {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.black)
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Color.white))
+            }
+            .buttonStyle(.plain)
+            .help(confirmHelp)
         }
-        .animation(.spring(response: 0.28, dampingFraction: 0.86), value: model.listeningPillCollapsed)
-        .padding(12)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 12)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.black.opacity(0.92))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
+        )
+        // No compositingGroup shadow — that casts a square halo around the panel.
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         .draggablePanel(
             onDragStart: { model.listeningPillOrigin() },
             onDragTo: { model.moveListeningPill(to: $0) }
@@ -25,28 +68,11 @@ struct ListeningPillView: View {
         .preferredColorScheme(.dark)
     }
 
-    private var collapsedBody: some View {
-        ZStack {
-            // AppKit drag + click (SwiftUI Button fights window dragging).
-            WindowDragHandle(onClick: { model.expandListeningPill() })
-
-            VoiceWaveformView(
-                level: model.audioLevel,
-                isActive: isLive,
-                tint: indicatorColor
-            )
-            .frame(width: 44, height: 36)
-            .allowsHitTesting(false)
+    private var cancelHelp: String {
+        switch model.phase {
+        case .meetingRecording: return "Cancel meeting recording"
+        default: return "Cancel dictation"
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial, in: Capsule(style: .continuous))
-        .overlay(
-            Capsule(style: .continuous)
-                .strokeBorder(.white.opacity(0.18), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.22), radius: 10, y: 4)
-        .help("Listening — drag to move, click to show transcript")
     }
 
     private var expandedBody: some View {
@@ -54,23 +80,45 @@ struct ListeningPillView: View {
             // Grip + collapse: drag handle interprets short click as collapse.
             ZStack {
                 WindowDragHandle(onClick: { model.collapseListeningPill() })
-                VoiceWaveformView(
-                    level: model.audioLevel,
-                    isActive: isLive,
-                    tint: indicatorColor
-                )
-                .frame(width: 44, height: 36)
-                .allowsHitTesting(false)
+                if model.phase == .meetingRecording {
+                    MeetingDualWaveformView(
+                        youLevel: model.audioLevel,
+                        othersLevel: model.remoteAudioLevel,
+                        activeChannel: model.activeMeetingChannel,
+                        remoteLabel: model.remoteSpeakerLabel
+                    )
+                    .frame(width: 72, height: 36)
+                    .allowsHitTesting(false)
+                } else {
+                    VoiceWaveformView(
+                        level: model.audioLevel,
+                        isActive: isLive,
+                        tint: indicatorColor
+                    )
+                    .frame(width: 44, height: 36)
+                    .allowsHitTesting(false)
+                }
             }
-            .frame(width: 44, height: 36)
+            .frame(width: model.phase == .meetingRecording ? 72 : 44, height: 36)
             .help("Drag to move · click to collapse")
 
             HStack(alignment: .top, spacing: 8) {
-                ScrollingTranscriptView(
-                    text: displayText,
-                    isLive: isLive
-                )
-                .frame(maxWidth: .infinity, minHeight: 28, maxHeight: 48, alignment: .topLeading)
+                VStack(alignment: .leading, spacing: 4) {
+                    if model.phase == .meetingRecording {
+                        MeetingChannelChips(
+                            activeChannel: model.activeMeetingChannel,
+                            remoteLabel: model.remoteSpeakerLabel,
+                            systemAudioFailed: model.activeMeetingID.flatMap { id in
+                                model.meetings.notes.first(where: { $0.id == id })?.systemAudioCaptureFailed
+                            } ?? false
+                        )
+                    }
+                    ScrollingTranscriptView(
+                        text: displayText,
+                        isLive: isLive
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 28, maxHeight: 48, alignment: .topLeading)
+                }
 
                 if model.phase == .listening, model.currentTone != .raw {
                     ToneChipButton(tone: model.currentTone) {
@@ -81,7 +129,7 @@ struct ListeningPillView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .frame(width: 380)
+        .frame(width: model.phase == .meetingRecording ? 420 : 380)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
@@ -96,11 +144,18 @@ struct ListeningPillView: View {
         return model.statusMessage
     }
 
+    private var confirmHelp: String {
+        switch model.phase {
+        case .meetingRecording: return "Stop and save meeting notes"
+        default: return "Finish and paste"
+        }
+    }
+
     private var indicatorColor: Color {
         switch model.phase {
         case .listening, .meetingRecording: return .white
         case .processing, .meetingProcessing: return .orange
-        case .idle: return .green
+        case .idle: return .white.opacity(0.45)
         }
     }
 }
@@ -130,7 +185,6 @@ private struct ToneChipButton: View {
     }
 }
 
-/// Multi-line transcript that always keeps the latest words visible.
 struct ScrollingTranscriptView: View {
     let text: String
     let isLive: Bool
@@ -158,7 +212,6 @@ struct ScrollingTranscriptView: View {
     }
 }
 
-/// Animated bars driven by live microphone level.
 struct VoiceWaveformView: View {
     let level: Float
     let isActive: Bool
@@ -190,6 +243,102 @@ struct VoiceWaveformView: View {
         let speech = CGFloat(max(0.05, min(1, level)))
         let height = base + maxExtra * (0.25 * CGFloat(wobble) + 0.75 * speech * CGFloat(0.55 + 0.45 * wobble))
         return height
+    }
+}
+
+/// Horizontal bars stacked vertically — Wispr Flow side-rail waveform.
+struct SideWaveformView: View {
+    let level: Float
+    let isActive: Bool
+    let tint: Color
+
+    private let barCount = 11
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isActive)) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            VStack(alignment: .center, spacing: 2.5) {
+                ForEach(0..<barCount, id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .fill(tint.opacity(isActive ? 0.95 : 0.35))
+                        .frame(width: barWidth(index: index, time: t), height: 2.5)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        }
+    }
+
+    private func barWidth(index: Int, time: TimeInterval) -> CGFloat {
+        let mid = Double(barCount - 1) / 2
+        // Diamond envelope — longest in the middle, short at the ends.
+        let envelope = 1 - abs(Double(index) - mid) / mid
+        let base: CGFloat = 4
+        let maxExtra: CGFloat = 16
+        guard isActive else {
+            return base + maxExtra * CGFloat(envelope) * 0.45
+        }
+
+        let phase = Double(index) * 0.55
+        let wobble = (sin(time * (10.0 + Double(index) * 0.9) + phase) + 1) / 2
+        let speech = CGFloat(max(0.08, min(1, level)))
+        let pulse = 0.3 * CGFloat(wobble) + 0.7 * speech * CGFloat(0.5 + 0.5 * wobble)
+        return base + maxExtra * CGFloat(envelope) * (0.35 + 0.65 * pulse)
+    }
+}
+
+/// Compact You | Others meters for meeting capture.
+private struct MeetingDualWaveformView: View {
+    let youLevel: Float
+    let othersLevel: Float
+    let activeChannel: AppModel.MeetingChannel?
+    let remoteLabel: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            VoiceWaveformView(
+                level: youLevel,
+                isActive: true,
+                tint: activeChannel == .you ? Color.white : Color.white.opacity(0.45)
+            )
+            .frame(width: 28)
+            VoiceWaveformView(
+                level: othersLevel,
+                isActive: true,
+                tint: activeChannel == .others ? Color.cyan : Color.white.opacity(0.35)
+            )
+            .frame(width: 28)
+        }
+        .help("You · \(remoteLabel)")
+    }
+}
+
+private struct MeetingChannelChips: View {
+    let activeChannel: AppModel.MeetingChannel?
+    let remoteLabel: String
+    let systemAudioFailed: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            chip("You", hot: activeChannel == .you, tint: .white)
+            chip(remoteLabel, hot: activeChannel == .others, tint: .cyan)
+            if systemAudioFailed {
+                Text("Mic only")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.orange.opacity(0.95))
+            }
+        }
+    }
+
+    private func chip(_ title: String, hot: Bool, tint: Color) -> some View {
+        Text(title)
+            .font(.system(size: 9, weight: .semibold, design: .rounded))
+            .foregroundStyle(hot ? tint : .white.opacity(0.45))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(hot ? 0.18 : 0.08))
+            )
     }
 }
 
@@ -238,26 +387,56 @@ private struct AbsolutePanelDragModifier: ViewModifier {
 }
 
 /// AppKit drag handle — click (no drag) fires `onClick`; drag moves the window.
+/// Optional `onHover` uses a tracking area so expand works even when the panel isn't key.
 struct WindowDragHandle: NSViewRepresentable {
     var onClick: (() -> Void)?
+    var onHover: ((Bool) -> Void)?
 
     func makeNSView(context: Context) -> WindowDragNSView {
         let view = WindowDragNSView()
         view.onClick = onClick
+        view.onHover = onHover
         return view
     }
 
     func updateNSView(_ nsView: WindowDragNSView, context: Context) {
         nsView.onClick = onClick
+        nsView.onHover = onHover
+        nsView.updateTrackingAreas()
     }
 }
 
 final class WindowDragNSView: NSView {
     var onClick: (() -> Void)?
+    var onHover: ((Bool) -> Void)?
     private let clickSlop: CGFloat = 5
 
     override var mouseDownCanMoveWindow: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas {
+            removeTrackingArea(area)
+        }
+        guard onHover != nil else { return }
+        addTrackingArea(
+            NSTrackingArea(
+                rect: .zero,
+                options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            )
+        )
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHover?(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHover?(false)
+    }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         // Always claim hits inside our bounds so we sit above SwiftUI chrome.

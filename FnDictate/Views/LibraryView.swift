@@ -2,88 +2,6 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-// MARK: - Theme (adaptive light / dark)
-
-private enum FlowTheme {
-    static let canvas = Color(nsColor: .flowCanvas)
-    static let sidebar = Color(nsColor: .flowSidebar)
-    static let card = Color(nsColor: .flowCard)
-    static let cream = Color(nsColor: .flowCream)
-    static let accent = Color(nsColor: .flowAccent)
-    static let accentSoft = Color(nsColor: .flowAccentSoft)
-    static let ink = Color(nsColor: .flowInk)
-    static let muted = Color(nsColor: .flowMuted)
-    static let hairline = Color(nsColor: .flowHairline)
-    /// Filled CTA (black in light, off-white in dark).
-    static let solid = Color(nsColor: .flowSolid)
-    static let onSolid = Color(nsColor: .flowOnSolid)
-    /// Text sitting on a white chip (always dark).
-    static let onLightChip = Color(red: 0.11, green: 0.11, blue: 0.11)
-
-    static let warmGradient = LinearGradient(
-        colors: [
-            Color(red: 0.72, green: 0.52, blue: 0.35),
-            Color(red: 0.55, green: 0.38, blue: 0.28),
-            Color(red: 0.42, green: 0.30, blue: 0.24)
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
-}
-
-private extension NSColor {
-    static func flowDynamic(light: NSColor, dark: NSColor) -> NSColor {
-        NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
-        }
-    }
-
-    static let flowCanvas = flowDynamic(
-        light: NSColor(srgbRed: 0.973, green: 0.973, blue: 0.969, alpha: 1),
-        dark: NSColor(srgbRed: 0.102, green: 0.100, blue: 0.094, alpha: 1) // #1A1918
-    )
-    static let flowSidebar = flowDynamic(
-        light: NSColor(srgbRed: 0.957, green: 0.955, blue: 0.949, alpha: 1),
-        dark: NSColor(srgbRed: 0.078, green: 0.076, blue: 0.071, alpha: 1) // #141311
-    )
-    static let flowCard = flowDynamic(
-        light: .white,
-        dark: NSColor(srgbRed: 0.157, green: 0.153, blue: 0.145, alpha: 1) // #282724
-    )
-    static let flowCream = flowDynamic(
-        light: NSColor(srgbRed: 0.953, green: 0.949, blue: 0.933, alpha: 1),
-        dark: NSColor(srgbRed: 0.184, green: 0.176, blue: 0.165, alpha: 1) // #2F2D2A
-    )
-    static let flowAccent = flowDynamic(
-        light: NSColor(srgbRed: 0.890, green: 0.839, blue: 0.757, alpha: 1),
-        dark: NSColor(srgbRed: 0.420, green: 0.365, blue: 0.290, alpha: 1) // warm selected
-    )
-    static let flowAccentSoft = flowDynamic(
-        light: NSColor(srgbRed: 0.925, green: 0.890, blue: 0.835, alpha: 1),
-        dark: NSColor(srgbRed: 0.235, green: 0.210, blue: 0.175, alpha: 1)
-    )
-    static let flowInk = flowDynamic(
-        light: NSColor(srgbRed: 0.110, green: 0.110, blue: 0.110, alpha: 1),
-        dark: NSColor(srgbRed: 0.953, green: 0.945, blue: 0.925, alpha: 1) // #F3F1EC
-    )
-    static let flowMuted = flowDynamic(
-        light: NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.45),
-        dark: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.48)
-    )
-    static let flowHairline = flowDynamic(
-        light: NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 0.08),
-        dark: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.10)
-    )
-    static let flowSolid = flowDynamic(
-        light: .black,
-        dark: NSColor(srgbRed: 0.953, green: 0.945, blue: 0.925, alpha: 1)
-    )
-    static let flowOnSolid = flowDynamic(
-        light: .white,
-        dark: NSColor(srgbRed: 0.110, green: 0.110, blue: 0.110, alpha: 1)
-    )
-}
-
 // MARK: - Library
 
 struct LibraryView: View {
@@ -114,9 +32,23 @@ struct LibraryView: View {
     @State private var hoveredDictionaryID: DictionaryEntry.ID?
     @State private var hoveredMeetingID: MeetingNote.ID?
     @State private var remindersExportNote: MeetingNote?
+    @State private var openMeetingDetail: MeetingDetailPresentation?
+    @State private var showProjectsEditor = false
+    @State private var meetingProjectFilter: MeetingProject.ID?
+    @AppStorage("meetingPreviewRailWidth") private var meetingPreviewRailWidth = 440.0
+    /// Live width while dragging. Persisted to `meetingPreviewRailWidth` only on release
+    /// so UserDefaults writes don't reset the gesture mid-drag.
+    @State private var meetingPreviewDragWidth: Double?
+    @State private var meetingPreviewDragStartWidth: Double?
+    @State private var meetingPreviewDragOriginX: CGFloat?
+
+    private struct MeetingDetailPresentation: Identifiable {
+        let id: MeetingNote.ID
+    }
 
     enum LibrarySection: String, CaseIterable, Identifiable {
         case dictations
+        case insights
         case dictionary
         case meetings
         case formatting
@@ -126,6 +58,7 @@ struct LibraryView: View {
         var icon: String {
             switch self {
             case .dictations: return "mic"
+            case .insights: return "chart.bar"
             case .dictionary: return "textformat"
             case .meetings: return "doc.text"
             case .formatting: return "slider.horizontal.3"
@@ -135,6 +68,7 @@ struct LibraryView: View {
         var help: String {
             switch self {
             case .dictations: return "Dictations"
+            case .insights: return "Insights"
             case .dictionary: return "Dictionary"
             case .meetings: return "Meetings"
             case .formatting: return "Formatting"
@@ -186,6 +120,14 @@ struct LibraryView: View {
         }
         .sheet(item: $remindersExportNote) { note in
             SendActionItemsToRemindersSheet(note: note, reminders: model.reminders)
+        }
+        .sheet(item: $openMeetingDetail) { presentation in
+            MeetingDetailView(noteID: presentation.id, model: model)
+                .frame(minWidth: 960, idealWidth: 1180, minHeight: 720, idealHeight: 900)
+                .presentationSizing(.page)
+        }
+        .sheet(isPresented: $showProjectsEditor) {
+            ProjectsEditorSheet(model: model)
         }
         .onAppear {
             applyRequestedTab()
@@ -294,6 +236,13 @@ struct LibraryView: View {
         switch section {
         case .dictations:
             dictationsPane
+        case .insights:
+            InsightsView(
+                insights: UsageInsights.from(
+                    entries: model.history.entries,
+                    dictionary: model.dictionary.entries
+                )
+            )
         case .dictionary:
             dictionaryPane
         case .meetings:
@@ -307,6 +256,7 @@ struct LibraryView: View {
         guard let tab = model.requestedLibraryTab else { return }
         switch tab {
         case .dictations: section = .dictations
+        case .insights: section = .insights
         case .dictionary: section = .dictionary
         case .meetings:
             section = .meetings
@@ -595,15 +545,31 @@ struct LibraryView: View {
         }
     }
 
+    private var usageInsights: UsageInsights {
+        UsageInsights.from(entries: model.history.entries, dictionary: model.dictionary.entries)
+    }
+
     private var statsCard: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            statRow(value: formattedWordCount, label: "total words")
-            statRow(value: "\(model.history.entries.count)", label: "dictations")
-            statRow(value: "\(dictationStreak)", label: dictationStreak == 1 ? "day streak" : "day streak")
+        Button {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                section = .insights
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 18) {
+                statRow(value: usageInsights.formattedWordCount, label: "total words")
+                statRow(value: "\(usageInsights.dictationCount)", label: "dictations")
+                statRow(
+                    value: "\(usageInsights.currentStreak)",
+                    label: "day streak"
+                )
+            }
+            .padding(22)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
-        .padding(22)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .buttonStyle(.plain)
+        .help("Open Insights")
+        .accessibilityLabel("Insights, \(usageInsights.formattedWordCount) total words, \(usageInsights.currentStreak) day streak")
     }
 
     private func statRow(value: String, label: String) -> some View {
@@ -709,6 +675,31 @@ struct LibraryView: View {
                 .toggleStyle(.checkbox)
                 .font(.caption)
 
+            if let raw = entry.originalText?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !raw.isEmpty
+            {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Raw speech")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(FlowTheme.muted)
+                        .tracking(0.4)
+
+                    Text(raw)
+                        .font(.system(size: 13))
+                        .foregroundStyle(FlowTheme.ink.opacity(0.75))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .frame(minHeight: 56, maxHeight: 120, alignment: .topLeading)
+                        .background(FlowTheme.card.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .stroke(FlowTheme.hairline, lineWidth: 1)
+                        )
+                        .textSelection(.enabled)
+                }
+            }
+
             if !speechCleanupSpans.isEmpty {
                 revisionDiffSection(
                     title: "From speech",
@@ -728,7 +719,7 @@ struct LibraryView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Text")
+                Text("Text · pasted")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(FlowTheme.muted)
                     .tracking(0.4)
@@ -930,42 +921,6 @@ struct LibraryView: View {
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(FlowTheme.accentSoft, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
-
-    private var totalWordCount: Int {
-        model.history.entries.reduce(0) { partial, entry in
-            partial + entry.text.split { $0.isWhitespace || $0.isNewline }.count
-        }
-    }
-
-    private var formattedWordCount: String {
-        let count = totalWordCount
-        if count >= 1_000 {
-            let k = Double(count) / 1_000.0
-            return String(format: k >= 10 ? "%.0fK" : "%.1fK", k)
-        }
-        return "\(count)"
-    }
-
-    private var dictationStreak: Int {
-        let calendar = Calendar.current
-        let days = Set(model.history.entries.map { calendar.startOfDay(for: $0.createdAt) })
-        guard !days.isEmpty else { return 0 }
-        var streak = 0
-        var cursor = calendar.startOfDay(for: .now)
-        // Allow streak to start from yesterday if nothing today yet.
-        if !days.contains(cursor) {
-            guard let yesterday = calendar.date(byAdding: .day, value: -1, to: cursor),
-                  days.contains(yesterday)
-            else { return 0 }
-            cursor = yesterday
-        }
-        while days.contains(cursor) {
-            streak += 1
-            guard let prev = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
-            cursor = prev
-        }
-        return streak
     }
 
     private func saveDictationEdit(_ entry: TranscriptEntry) {
@@ -1242,7 +1197,7 @@ struct LibraryView: View {
             .padding(.horizontal, 32)
             .padding(.vertical, 24)
             .frame(maxWidth: 900, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -1517,12 +1472,21 @@ struct LibraryView: View {
 
     private var filteredMeetings: [MeetingNote] {
         let q = meetingSearch.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return model.meetings.notes }
-        return model.meetings.notes.filter {
-            $0.title.localizedCaseInsensitiveContains(q)
-                || $0.summary.localizedCaseInsensitiveContains(q)
-                || $0.transcript.localizedCaseInsensitiveContains(q)
+        let searched: [MeetingNote]
+        if q.isEmpty {
+            searched = model.meetings.notes
+        } else {
+            searched = model.meetings.notes.filter {
+                $0.title.localizedCaseInsensitiveContains(q)
+                    || $0.summary.localizedCaseInsensitiveContains(q)
+                    || $0.transcript.localizedCaseInsensitiveContains(q)
+                    || ($0.sourceDisplayLabel?.localizedCaseInsensitiveContains(q) ?? false)
+                    || ($0.sourceAppName?.localizedCaseInsensitiveContains(q) ?? false)
+                    || (model.project(for: $0)?.name.localizedCaseInsensitiveContains(q) ?? false)
+            }
         }
+        guard let meetingProjectFilter else { return searched }
+        return searched.filter { $0.projectID == meetingProjectFilter }
     }
 
     private var groupedMeetings: [(String, [MeetingNote])] {
@@ -1644,8 +1608,36 @@ struct LibraryView: View {
                         }
                         .buttonStyle(.borderless)
                         .help("Open MCP-ready markdown export folder")
+
+                        Button {
+                            showProjectsEditor = true
+                        } label: {
+                            Label("Projects", systemImage: "tag")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Tag notes by project and set each project’s icon")
                     }
                     .padding(.top, 4)
+
+                    if !model.projects.projects.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 6) {
+                                projectFilterChip(title: "All", project: nil, selected: meetingProjectFilter == nil) {
+                                    meetingProjectFilter = nil
+                                }
+                                ForEach(model.projects.projects) { project in
+                                    projectFilterChip(
+                                        title: project.name,
+                                        project: project,
+                                        selected: meetingProjectFilter == project.id
+                                    ) {
+                                        meetingProjectFilter = meetingProjectFilter == project.id ? nil : project.id
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     if filteredMeetings.isEmpty {
                         emptyMeetings
@@ -1668,9 +1660,71 @@ struct LibraryView: View {
             }
             .frame(maxWidth: .infinity)
 
+            meetingPreviewResizeHandle
+
             meetingPreviewRail
-                .padding(20)
+                .padding([.top, .trailing, .bottom], 20)
         }
+    }
+
+    private var meetingPreviewMinWidth: Double { 300 }
+    private var meetingPreviewMaxWidth: Double { 820 }
+
+    private var meetingPreviewDisplayedWidth: Double {
+        let raw = meetingPreviewDragWidth ?? meetingPreviewRailWidth
+        return min(max(raw, meetingPreviewMinWidth), meetingPreviewMaxWidth)
+    }
+
+    private var meetingPreviewResizeHandle: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .frame(width: 10)
+            .contentShape(Rectangle())
+            .overlay {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(FlowTheme.hairline)
+                    .frame(width: 1, height: 48)
+            }
+            .help("Drag to resize preview")
+            .onHover { hovering in
+                DispatchQueue.main.async {
+                    if hovering {
+                        NSCursor.resizeLeftRight.set()
+                    } else {
+                        NSCursor.arrow.set()
+                    }
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { value in
+                        if meetingPreviewDragOriginX == nil {
+                            meetingPreviewDragOriginX = value.startLocation.x
+                            meetingPreviewDragStartWidth = meetingPreviewRailWidth
+                        }
+                        let origin = meetingPreviewDragOriginX ?? value.startLocation.x
+                        let start = meetingPreviewDragStartWidth ?? meetingPreviewRailWidth
+                        let proposed = start - Double(value.location.x - origin)
+                        let clamped = min(max(proposed, meetingPreviewMinWidth), meetingPreviewMaxWidth)
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) {
+                            meetingPreviewDragWidth = clamped
+                        }
+                    }
+                    .onEnded { value in
+                        let origin = meetingPreviewDragOriginX ?? value.startLocation.x
+                        let start = meetingPreviewDragStartWidth ?? meetingPreviewRailWidth
+                        let proposed = start - Double(value.location.x - origin)
+                        meetingPreviewRailWidth = min(
+                            max(proposed, meetingPreviewMinWidth),
+                            meetingPreviewMaxWidth
+                        )
+                        meetingPreviewDragWidth = nil
+                        meetingPreviewDragStartWidth = nil
+                        meetingPreviewDragOriginX = nil
+                    }
+            )
     }
 
     private var meetingsDayCard: some View {
@@ -1682,7 +1736,7 @@ struct LibraryView: View {
                     .labelStyle(.titleAndIcon)
                 Spacer()
                 if !model.calendar.isAuthorized {
-                    Button("Connect Calendar") {
+                    Button(model.calendar.needsOpenSettings ? "Open Calendar Settings" : "Connect Calendar") {
                         Task { await model.requestCalendarAccess() }
                     }
                     .font(.system(size: 12, weight: .semibold))
@@ -1791,8 +1845,17 @@ struct LibraryView: View {
         .padding(16)
         .background(FlowTheme.cream.opacity(0.55), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .onAppear {
+            model.calendar.refreshStatus()
             model.refreshUpcomingCalendar()
             Task { await model.refreshUpcomingBriefIfNeeded() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // User may have flipped Calendars in System Settings while the app was in back.
+            model.calendar.refreshStatus()
+            model.refreshUpcomingCalendar()
+            if model.calendar.isAuthorized {
+                Task { await model.refreshUpcomingBriefIfNeeded() }
+            }
         }
     }
 
@@ -1811,15 +1874,48 @@ struct LibraryView: View {
                         .foregroundStyle(FlowTheme.muted)
                 }
             }
+
+            if model.phase == .meetingRecording {
+                HStack(spacing: 8) {
+                    liveChannelBadge(
+                        title: "You",
+                        hot: model.activeMeetingChannel == .you,
+                        level: model.audioLevel
+                    )
+                    liveChannelBadge(
+                        title: model.remoteSpeakerLabel,
+                        hot: model.activeMeetingChannel == .others,
+                        level: model.remoteAudioLevel
+                    )
+                    if liveNote?.systemAudioCaptureFailed == true {
+                        Text("System audio failed — others may show as You")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.orange)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                if !model.liveParticipantRoster.isEmpty {
+                    Text("Roster: \(model.liveParticipantRoster.prefix(8).joined(separator: ", "))")
+                        .font(.system(size: 11))
+                        .foregroundStyle(FlowTheme.muted)
+                        .lineLimit(2)
+                }
+            }
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     if let liveNote, !liveNote.segments.isEmpty {
                         ForEach(liveNote.segments.sorted(by: { $0.startOffset < $1.startOffset })) { seg in
                             HStack(alignment: .top, spacing: 8) {
-                                Text(seg.speaker)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(FlowTheme.muted)
-                                    .frame(width: 56, alignment: .leading)
+                                VoiceSpeakerLabel(
+                                    speaker: seg.speaker,
+                                    voiceID: seg.voiceID,
+                                    fontSize: 11,
+                                    width: 92
+                                ) { id, name in
+                                    model.renameRememberedVoice(id: id, to: name)
+                                }
                                 Text(seg.text)
                                     .font(.system(size: 13))
                                     .foregroundStyle(FlowTheme.ink)
@@ -1848,6 +1944,32 @@ struct LibraryView: View {
         )
     }
 
+    private func liveChannelBadge(title: String, hot: Bool, level: Float) -> some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(hot ? FlowTheme.solid : FlowTheme.muted.opacity(0.35))
+                .frame(width: 7, height: 7)
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(hot ? FlowTheme.ink : FlowTheme.muted)
+            Text(String(format: "%.0f%%", Double(min(1, level)) * 100))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(FlowTheme.muted)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(hot ? FlowTheme.solid.opacity(0.12) : FlowTheme.cream.opacity(0.7))
+        )
+    }
+
+    private func speakerColor(_ speaker: String) -> Color {
+        if speaker == "You" { return FlowTheme.ink }
+        if speaker == "Others" { return FlowTheme.muted }
+        return FlowTheme.solid
+    }
+
     private func looksLikeQuestion(_ text: String) -> Bool {
         let q = text.lowercased()
         if text.contains("?") { return true }
@@ -1859,6 +1981,9 @@ struct LibraryView: View {
         let selected = selectedMeetingID == note.id
         let metaParts: [String] = {
             var parts = [note.createdAt.formatted(date: .omitted, time: .shortened).lowercased()]
+            if let source = model.callSourceLabel(for: note) {
+                parts.append(source)
+            }
             if let duration = note.formattedDuration {
                 parts.append(duration)
             }
@@ -1867,14 +1992,18 @@ struct LibraryView: View {
             }
             return parts
         }()
-        let actionPreview = note.actionItems.first
+        let project = model.project(for: note)
+        let actionPreview = note.actionItems.first.map { ParsedActionItem.parse($0) }
+        let actionLine: String? = actionPreview.map { parsed in
+            let task = parsed.task.isEmpty ? (note.actionItems.first ?? "") : parsed.task
+            if let assignee = parsed.assignee {
+                return "[\(assignee)] \(task)"
+            }
+            return task
+        }
 
         return HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "doc.text")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(FlowTheme.muted)
-                .frame(width: 34, height: 34)
-                .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            meetingSourceIcon(note, project: project)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(note.title)
@@ -1882,10 +2011,24 @@ struct LibraryView: View {
                     .foregroundStyle(FlowTheme.ink)
                     .lineLimit(1)
 
-                Text(metaParts.joined(separator: " · "))
-                    .font(.system(size: 12))
-                    .foregroundStyle(FlowTheme.muted)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    if let project {
+                        Text(project.name)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(ProjectMark.color(hex: project.colorHex))
+                            .lineLimit(1)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(
+                                ProjectMark.color(hex: project.colorHex).opacity(0.16),
+                                in: Capsule()
+                            )
+                    }
+                    Text(metaParts.joined(separator: " · "))
+                        .font(.system(size: 12))
+                        .foregroundStyle(FlowTheme.muted)
+                        .lineLimit(1)
+                }
 
                 if note.processingState == .processing {
                     HStack(spacing: 6) {
@@ -1901,9 +2044,10 @@ struct LibraryView: View {
                         Image(systemName: "checklist")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(FlowTheme.muted)
-                        Text(actionPreview)
+                        Text(actionLine ?? "")
                             .font(.system(size: 12))
-                            .foregroundStyle(FlowTheme.ink.opacity(0.82))
+                            .foregroundStyle(FlowTheme.ink.opacity(actionPreview.isDone ? 0.45 : 0.82))
+                            .strikethrough(actionPreview.isDone, color: FlowTheme.muted)
                             .lineLimit(1)
                         if note.actionItems.count > 1 {
                             Text("+\(note.actionItems.count - 1)")
@@ -1917,8 +2061,8 @@ struct LibraryView: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(
                         note.actionItems.count == 1
-                            ? "1 action item: \(actionPreview)"
-                            : "\(note.actionItems.count) action items. First: \(actionPreview)"
+                            ? "1 action item: \(actionPreview.task)"
+                            : "\(note.actionItems.count) action items. First: \(actionPreview.task)"
                     )
                 }
             }
@@ -1945,11 +2089,49 @@ struct LibraryView: View {
         .onHover { hovering in
             hoveredMeetingID = hovering ? note.id : (hoveredMeetingID == note.id ? nil : hoveredMeetingID)
         }
-        .onTapGesture { selectedMeetingID = note.id }
+        .gesture(
+            TapGesture(count: 2)
+                .onEnded { _ in openMeeting(note) }
+                .exclusively(before:
+                    TapGesture(count: 1)
+                        .onEnded { _ in selectedMeetingID = note.id }
+                )
+        )
         .contextMenu {
+            Button("Open Note") {
+                openMeeting(note)
+            }
+            Menu("Project") {
+                Button("None") {
+                    model.setMeetingProject(nil, noteID: note.id)
+                }
+                ForEach(model.projects.projects) { project in
+                    Button {
+                        model.setMeetingProject(project.id, noteID: note.id)
+                    } label: {
+                        if note.projectID == project.id {
+                            Label(project.name, systemImage: "checkmark")
+                        } else {
+                            Text(project.name)
+                        }
+                    }
+                }
+                Divider()
+                Button("Edit projects…") {
+                    showProjectsEditor = true
+                }
+            }
+            if note.processingState == .processing {
+                Button("Stop Processing") {
+                    model.stopMeetingProcessing(id: note.id)
+                }
+                Button("Retry Processing") {
+                    model.reprocessMeeting(id: note.id)
+                }
+            }
             Button("Copy Markdown") {
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(note.markdownExport, forType: .string)
+                NSPasteboard.general.setString(model.markdownExport(for: note), forType: .string)
             }
             if !note.actionItems.isEmpty {
                 Button("Send action items to Reminders…") {
@@ -1960,9 +2142,77 @@ struct LibraryView: View {
             Button("Delete", role: .destructive) {
                 model.meetings.delete(note)
                 if selectedMeetingID == note.id { selectedMeetingID = nil }
+                if openMeetingDetail?.id == note.id { openMeetingDetail = nil }
             }
         }
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint("Selects the note. Double-click to open the full note.")
+        .accessibilityAction(named: "Open Note") {
+            openMeeting(note)
+        }
+    }
+
+    private func openMeeting(_ note: MeetingNote) {
+        selectedMeetingID = note.id
+        openMeetingDetail = MeetingDetailPresentation(id: note.id)
+    }
+
+    @ViewBuilder
+    private func meetingSourceIcon(_ note: MeetingNote, project: MeetingProject?) -> some View {
+        Group {
+            if let project {
+                ProjectMark(
+                    project: project,
+                    image: model.projects.iconImage(for: project),
+                    size: 34
+                )
+            } else if let icon = AppIconCache.icon(
+                bundleID: note.sourceAppBundleID,
+                appName: note.sourceAppName
+            ) {
+                Image(nsImage: icon)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 18, height: 18)
+                    .frame(width: 34, height: 34)
+                    .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            } else {
+                Image(systemName: "doc.text")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(FlowTheme.muted)
+                    .frame(width: 34, height: 34)
+                    .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
+        }
+        .help(project.map { "\($0.name)\(model.callSourceLabel(for: note).map { " · \($0)" } ?? "")" } ?? (note.sourceDisplayLabel ?? "Meeting note"))
+    }
+
+    private func projectFilterChip(
+        title: String,
+        project: MeetingProject?,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let project {
+                    Circle()
+                        .fill(ProjectMark.color(hex: project.colorHex))
+                        .frame(width: 7, height: 7)
+                }
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(selected ? FlowTheme.ink : FlowTheme.muted)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule().fill(selected ? FlowTheme.card : Color.clear)
+            )
+            .overlay(Capsule().stroke(FlowTheme.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
     }
 
     private var emptyMeetings: some View {
@@ -1979,11 +2229,12 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var meetingPreviewRail: some View {
+        let width = meetingPreviewDisplayedWidth
         if let id = selectedMeetingID,
            let note = model.meetings.notes.first(where: { $0.id == id })
         {
             MeetingPreviewCard(noteID: note.id, model: model)
-                .frame(width: 320)
+                .frame(width: width)
         } else {
             VStack(spacing: 10) {
                 Image(systemName: "doc.text")
@@ -1993,7 +2244,7 @@ struct LibraryView: View {
                     .font(.subheadline)
                     .foregroundStyle(FlowTheme.muted)
             }
-            .frame(width: 320)
+            .frame(width: width)
             .frame(maxHeight: .infinity)
             .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         }
@@ -2079,7 +2330,7 @@ struct LibraryView: View {
 // MARK: - Dictation row (isolated hover + cached icons)
 
 @MainActor
-private enum AppIconCache {
+enum AppIconCache {
     private static var icons: [String: NSImage] = [:]
     private static var misses: Set<String> = []
 
@@ -2243,11 +2494,33 @@ private struct DictationRowView: View {
 
 // MARK: - Meeting preview / detail
 
+private enum MeetingRailSection: String, Identifiable {
+    case actionItems
+    case keyPoints
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .actionItems: "Action items"
+        case .keyPoints: "Key points"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .actionItems: "checklist"
+        case .keyPoints: "lightbulb"
+        }
+    }
+}
+
 private struct MeetingPreviewCard: View {
     let noteID: MeetingNote.ID
     @Bindable var model: AppModel
     @State private var showFull = false
     @State private var showRemindersExport = false
+    @State private var focusedSection: MeetingRailSection?
 
     private var note: MeetingNote? {
         model.meetings.notes.first(where: { $0.id == noteID })
@@ -2260,6 +2533,12 @@ private struct MeetingPreviewCard: View {
             parts.append("Today · \(note.createdAt.formatted(date: .omitted, time: .shortened).lowercased())")
         } else {
             parts.append(note.createdAt.formatted(date: .abbreviated, time: .shortened))
+        }
+        if let project = model.project(for: note) {
+            parts.append(project.name)
+        }
+        if let source = model.callSourceLabel(for: note) {
+            parts.append(source)
         }
         if let duration = note.formattedDuration {
             parts.append(duration)
@@ -2304,9 +2583,11 @@ private struct MeetingPreviewCard: View {
                             .lineLimit(3)
                     }
 
-                    MeetingProcessingBanner(note: note) {
-                        model.reprocessMeeting(id: note.id)
-                    }
+                    MeetingProcessingBanner(
+                        note: note,
+                        onReprocess: { model.reprocessMeeting(id: note.id) },
+                        onStop: { model.stopMeetingProcessing(id: note.id) }
+                    )
 
                     HStack(spacing: 8) {
                         Button {
@@ -2340,12 +2621,9 @@ private struct MeetingPreviewCard: View {
                     }
 
                     if !note.actionItems.isEmpty {
-                        previewBulletSection(
-                            title: "Action items",
-                            icon: "checklist",
-                            items: note.actionItems,
-                            limit: 5
-                        )
+                        previewActionItemsSection(note.actionItems, limit: 6) {
+                            focusedSection = .actionItems
+                        }
                     }
 
                     if !keyPoints.isEmpty {
@@ -2354,7 +2632,9 @@ private struct MeetingPreviewCard: View {
                             icon: "lightbulb",
                             items: keyPoints,
                             limit: 5
-                        )
+                        ) {
+                            focusedSection = .keyPoints
+                        }
                     }
 
                     if !note.openQuestions.isEmpty {
@@ -2396,10 +2676,16 @@ private struct MeetingPreviewCard: View {
         .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .sheet(isPresented: $showFull) {
             MeetingDetailView(noteID: noteID, model: model)
-                .frame(minWidth: 640, minHeight: 520)
+                .frame(minWidth: 960, idealWidth: 1180, minHeight: 720, idealHeight: 900)
+                .presentationSizing(.page)
         }
         .sheet(isPresented: $showRemindersExport) {
             SendActionItemsToRemindersSheet(note: note, reminders: model.reminders)
+        }
+        .sheet(item: $focusedSection) { section in
+            MeetingSectionSheet(noteID: noteID, section: section, model: model)
+                .frame(minWidth: 480, idealWidth: 560, maxWidth: 680, minHeight: 420, idealHeight: 640)
+                .presentationSizing(.fitted)
         }
     }
 
@@ -2413,27 +2699,115 @@ private struct MeetingPreviewCard: View {
         return note.summary
     }
 
+    private func previewActionItemsSection(
+        _ items: [String],
+        limit: Int,
+        onOpen: @escaping () -> Void
+    ) -> some View {
+        let groups = ActionItemGroup.groups(from: items)
+        var remaining = limit
+        var visible: [(group: ActionItemGroup, tasks: [(text: String, done: Bool)])] = []
+        for group in groups {
+            guard remaining > 0 else { break }
+            let tasks = group.indices.compactMap { index -> (text: String, done: Bool)? in
+                guard items.indices.contains(index) else { return nil }
+                let parsed = ParsedActionItem.parse(items[index])
+                let text = parsed.task.isEmpty ? items[index] : parsed.task
+                return (text, parsed.isDone)
+            }
+            let slice = Array(tasks.prefix(remaining))
+            remaining -= slice.count
+            visible.append((group, slice))
+        }
+
+        return VStack(alignment: .leading, spacing: 10) {
+            previewSectionHeader(
+                title: "Action items",
+                icon: "checklist",
+                count: items.count,
+                help: "Open all action items",
+                action: onOpen
+            )
+
+            ForEach(Array(visible.enumerated()), id: \.offset) { _, entry in
+                let style = AssigneePersona.style(for: entry.group.assignee)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: style.icon)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(style.tint)
+                        Text(entry.group.displayName)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(FlowTheme.ink.opacity(0.9))
+                        Text("\(entry.group.count)")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(style.tint.opacity(0.9))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(style.soft, in: Capsule())
+                    }
+
+                    ForEach(Array(entry.tasks.enumerated()), id: \.offset) { _, task in
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: task.done ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(style.tint.opacity(task.done ? 0.9 : 0.55))
+                                .padding(.top, 2)
+                            Text(task.text)
+                                .font(.system(size: 13))
+                                .foregroundStyle(FlowTheme.ink.opacity(task.done ? 0.45 : 0.9))
+                                .strikethrough(task.done, color: FlowTheme.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+
+            if items.count > limit {
+                previewMoreButton(hiddenCount: items.count - limit, action: onOpen)
+            }
+        }
+        .padding(12)
+        .background(FlowTheme.card.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(FlowTheme.hairline, lineWidth: 1)
+        )
+    }
+
     private func previewBulletSection(
         title: String,
         icon: String,
         items: [String],
-        limit: Int
+        limit: Int,
+        onOpen: (() -> Void)? = nil
     ) -> some View {
         let visible = Array(items.prefix(limit))
         return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(FlowTheme.muted)
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer(minLength: 0)
-                Text("\(items.count)")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(FlowTheme.ink.opacity(0.7))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(FlowTheme.accentSoft, in: Capsule())
+            if let onOpen {
+                previewSectionHeader(
+                    title: title,
+                    icon: icon,
+                    count: items.count,
+                    help: "Open all \(title.lowercased())",
+                    action: onOpen
+                )
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: icon)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(FlowTheme.muted)
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                    Spacer(minLength: 0)
+                    Text("\(items.count)")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(FlowTheme.ink.opacity(0.7))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(FlowTheme.accentSoft, in: Capsule())
+                }
             }
 
             ForEach(Array(visible.enumerated()), id: \.offset) { _, item in
@@ -2450,7 +2824,9 @@ private struct MeetingPreviewCard: View {
                 }
             }
 
-            if items.count > limit {
+            if items.count > limit, let onOpen {
+                previewMoreButton(hiddenCount: items.count - limit, action: onOpen)
+            } else if items.count > limit {
                 Text("+\(items.count - limit) more in note")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(FlowTheme.muted)
@@ -2464,29 +2840,240 @@ private struct MeetingPreviewCard: View {
                 .stroke(FlowTheme.hairline, lineWidth: 1)
         )
     }
+
+    private func previewSectionHeader(
+        title: String,
+        icon: String,
+        count: Int,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(FlowTheme.muted)
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(FlowTheme.ink)
+                Spacer(minLength: 0)
+                Text("\(count)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(FlowTheme.ink.opacity(0.7))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(FlowTheme.accentSoft, in: Capsule())
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(FlowTheme.muted)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(help)
+    }
+
+    private func previewMoreButton(hiddenCount: Int, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text("+\(hiddenCount) more")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(FlowTheme.ink.opacity(0.75))
+        }
+        .buttonStyle(.plain)
+        .help("Open the full list")
+    }
+}
+
+private struct MeetingSectionSheet: View {
+    let noteID: MeetingNote.ID
+    let section: MeetingRailSection
+    @Bindable var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var showRemindersExport = false
+
+    private var note: MeetingNote? {
+        model.meetings.notes.first(where: { $0.id == noteID })
+    }
+
+    var body: some View {
+        Group {
+            if let note {
+                sheetBody(note)
+            } else {
+                Text("Note unavailable")
+                    .foregroundStyle(FlowTheme.muted)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .background(FlowTheme.cream)
+    }
+
+    @ViewBuilder
+    private func sheetBody(_ note: MeetingNote) -> some View {
+        let items = section == .actionItems ? note.actionItems : note.decisions
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: section.icon)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(FlowTheme.muted)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(section.title)
+                        .font(.system(size: 18, weight: .semibold))
+                    Text(note.title)
+                        .font(.system(size: 12))
+                        .foregroundStyle(FlowTheme.muted)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Text("\(items.count)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(FlowTheme.ink.opacity(0.7))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(FlowTheme.accentSoft, in: Capsule())
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(FlowTheme.muted)
+                        .frame(width: 28, height: 28)
+                        .background(FlowTheme.card, in: Circle())
+                        .overlay(Circle().stroke(FlowTheme.hairline, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .help("Close")
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, 22)
+            .padding(.top, 18)
+            .padding(.bottom, 12)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    switch section {
+                    case .actionItems:
+                        actionItemsList(note)
+                    case .keyPoints:
+                        keyPointsList(note.decisions)
+                    }
+                }
+                .padding(.horizontal, 22)
+                .padding(.bottom, 20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if section == .actionItems, !note.actionItems.isEmpty {
+                HStack {
+                    Button("Send to Reminders…") {
+                        showRemindersExport = true
+                    }
+                    Spacer()
+                    Button("Done") { dismiss() }
+                        .keyboardShortcut(.defaultAction)
+                }
+                .padding(.horizontal, 22)
+                .padding(.vertical, 14)
+                .background(FlowTheme.cream.opacity(0.9))
+            }
+        }
+        .sheet(isPresented: $showRemindersExport) {
+            SendActionItemsToRemindersSheet(note: note, reminders: model.reminders)
+        }
+    }
+
+    private func actionItemsList(_ note: MeetingNote) -> some View {
+        let groups = ActionItemGroup.groups(from: note.actionItems)
+        return VStack(alignment: .leading, spacing: 12) {
+            ForEach(groups) { group in
+                ActionItemGroupCard(
+                    group: group,
+                    rawItems: note.actionItems,
+                    candidates: assigneeOptions(for: note, including: group.assignee)
+                ) { index, updated in
+                    model.meetings.updateActionItem(id: note.id, index: index, text: updated)
+                }
+            }
+        }
+    }
+
+    private func keyPointsList(_ items: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                HStack(alignment: .top, spacing: 8) {
+                    Circle()
+                        .fill(FlowTheme.muted.opacity(0.55))
+                        .frame(width: 5, height: 5)
+                        .padding(.top, 6)
+                    Text(item)
+                        .font(.system(size: 14))
+                        .foregroundStyle(FlowTheme.ink.opacity(0.92))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private func assigneeOptions(for note: MeetingNote, including current: String?) -> [String] {
+        var options = note.actionItemAssigneeCandidates(including: model.project(for: note)?.people ?? [])
+        if let current, !current.isEmpty,
+           !options.contains(where: { $0.caseInsensitiveCompare(current) == .orderedSame }) {
+            options.append(current)
+        }
+        for raw in note.actionItems {
+            if let name = ParsedActionItem.parse(raw).assignee,
+               !options.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
+                options.append(name)
+            }
+        }
+        return options
+    }
 }
 
 private struct MeetingProcessingBanner: View {
     let note: MeetingNote
     var onReprocess: (() -> Void)?
+    var onStop: (() -> Void)?
 
     var body: some View {
         switch note.processingState {
         case .processing:
-            HStack(spacing: 10) {
-                ProgressView()
-                    .controlSize(.small)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Processing notes…")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text(note.processingMessage ?? "Summary and action items usually finish within a minute for long meetings.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(FlowTheme.muted)
-                        .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Processing notes…")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(note.processingMessage ?? "Summary and action items usually finish within a minute for long meetings.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(FlowTheme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
+                HStack(spacing: 8) {
+                    if let onStop {
+                        Button("Stop") {
+                            onStop()
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                        .buttonStyle(.bordered)
+                    }
+                    if let onReprocess {
+                        Button("Retry") {
+                            onReprocess()
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                        .buttonStyle(.bordered)
+                    }
+                }
             }
             .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(FlowTheme.accentSoft.opacity(0.65), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
         case .incomplete:
@@ -2564,6 +3151,10 @@ struct MeetingDetailView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var showRemindersExport = false
+    @State private var renameFrom: String = ""
+    @State private var renameTo: String = ""
+    @State private var showRenameSheet = false
+    @State private var overviewExpanded = false
 
     private var note: MeetingNote? {
         model.meetings.notes.first(where: { $0.id == noteID })
@@ -2599,41 +3190,71 @@ struct MeetingDetailView: View {
                 .help("Close")
                 .keyboardShortcut(.cancelAction)
             }
-            .padding(.horizontal, 20)
+            .padding(.horizontal, 24)
             .padding(.top, 16)
             .padding(.bottom, 4)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 20) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(note.title)
                             .font(.system(size: 28, weight: .regular, design: .serif))
                         Text(note.createdAt.formatted(date: .complete, time: .shortened))
                             .foregroundStyle(FlowTheme.muted)
+                        if let project = model.project(for: note) {
+                            HStack(spacing: 8) {
+                                ProjectMark(
+                                    project: project,
+                                    image: model.projects.iconImage(for: project),
+                                    size: 16
+                                )
+                                Text(project.name)
+                                    .foregroundStyle(FlowTheme.muted)
+                            }
+                        }
+                        if let source = model.callSourceLabel(for: note) {
+                            HStack(spacing: 8) {
+                                if note.sourceAppBundleID != nil || note.sourceAppName != nil,
+                                   let icon = AppIconCache.icon(
+                                    bundleID: note.sourceAppBundleID,
+                                    appName: note.sourceAppName
+                                   ) {
+                                    Image(nsImage: icon)
+                                        .resizable()
+                                        .interpolation(.high)
+                                        .frame(width: 14, height: 14)
+                                }
+                                Text(source)
+                                    .foregroundStyle(FlowTheme.muted)
+                            }
+                        }
                         if !note.attendees.isEmpty {
                             Text(note.attendees.joined(separator: ", "))
                                 .foregroundStyle(FlowTheme.muted)
                         }
+                        if !note.participantRoster.isEmpty {
+                            Text("Roster: \(note.participantRoster.joined(separator: ", "))")
+                                .font(.system(size: 12))
+                                .foregroundStyle(FlowTheme.muted)
+                        }
                     }
 
-                    MeetingProcessingBanner(note: note) {
-                        model.reprocessMeeting(id: note.id)
-                    }
+                    MeetingProcessingBanner(
+                        note: note,
+                        onReprocess: { model.reprocessMeeting(id: note.id) },
+                        onStop: { model.stopMeetingProcessing(id: note.id) }
+                    )
 
                     if let brief = note.brief, !brief.isEmpty {
                         section("Pre-meeting brief", brief)
                     }
 
-                    section(
-                        "Overview",
-                        note.processingState == .processing
-                            ? (note.processingMessage ?? "Generating overview…")
-                            : (note.summary.isEmpty ? "No summary yet." : note.summary)
-                    )
-
                     if !note.actionItems.isEmpty {
-                        bulletSection("Action items", note.actionItems)
+                        actionItemsSection(note)
                     }
+
+                    overviewSection(note)
+
                     if !note.decisions.isEmpty {
                         bulletSection("Key points", note.decisions)
                     }
@@ -2646,14 +3267,35 @@ struct MeetingDetailView: View {
 
                     if !note.segments.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Transcript")
-                                .font(.title3.weight(.semibold))
+                            HStack {
+                                Text("Transcript")
+                                    .font(.title3.weight(.semibold))
+                                Spacer()
+                                Button("Rename speaker…") {
+                                    renameFrom = uniqueSpeakers(in: note).first(where: { $0 != "You" })
+                                        ?? uniqueSpeakers(in: note).first
+                                        ?? "Others"
+                                    renameTo = ""
+                                    showRenameSheet = true
+                                }
+                                .font(.system(size: 12, weight: .medium))
+                            }
+                            if note.segments.contains(where: { $0.speaker.caseInsensitiveCompare("You") != .orderedSame }) {
+                                Text("Each other person is kept as their own voice. Click a name to remember them in later meetings.")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(FlowTheme.muted)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                             ForEach(note.segments.sorted(by: { $0.startOffset < $1.startOffset })) { seg in
                                 HStack(alignment: .top, spacing: 10) {
-                                    Text(seg.speaker)
-                                        .font(.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(FlowTheme.muted)
-                                        .frame(width: 64, alignment: .leading)
+                                    VoiceSpeakerLabel(
+                                        speaker: seg.speaker,
+                                        voiceID: seg.voiceID,
+                                        fontSize: 12,
+                                        width: 96
+                                    ) { id, name in
+                                        model.renameRememberedVoice(id: id, to: name)
+                                    }
                                     Text(seg.text)
                                         .textSelection(.enabled)
                                 }
@@ -2663,15 +3305,15 @@ struct MeetingDetailView: View {
                         section("Transcript", note.transcript.isEmpty ? "Empty transcript." : note.transcript)
                     }
                 }
-                .padding(.horizontal, 28)
-                .padding(.bottom, 20)
-                .frame(maxWidth: 720, alignment: .leading)
+                .padding(.horizontal, 32)
+                .padding(.bottom, 24)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             HStack {
                 Button("Copy Markdown") {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(note.markdownExport, forType: .string)
+                    NSPasteboard.general.setString(model.markdownExport(for: note), forType: .string)
                 }
                 Button("Export…") { exportMarkdown(note) }
                 if !note.actionItems.isEmpty {
@@ -2679,16 +3321,19 @@ struct MeetingDetailView: View {
                         showRemindersExport = true
                     }
                 }
-                if note.processingState != .processing {
-                    Button("Reprocess") {
-                        model.reprocessMeeting(id: note.id)
+                if note.processingState == .processing {
+                    Button("Stop") {
+                        model.stopMeetingProcessing(id: note.id)
                     }
+                }
+                Button(note.processingState == .processing ? "Retry" : "Reprocess") {
+                    model.reprocessMeeting(id: note.id)
                 }
                 Spacer()
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction)
             }
-            .padding(.horizontal, 28)
+            .padding(.horizontal, 32)
             .padding(.vertical, 16)
             .background(FlowTheme.cream.opacity(0.9))
         }
@@ -2696,6 +3341,108 @@ struct MeetingDetailView: View {
         .sheet(isPresented: $showRemindersExport) {
             SendActionItemsToRemindersSheet(note: note, reminders: model.reminders)
         }
+        .sheet(isPresented: $showRenameSheet) {
+            RenameSpeakerSheet(
+                speakers: uniqueSpeakers(in: note),
+                suggestions: renameSuggestions(for: note),
+                from: $renameFrom,
+                to: $renameTo
+            ) {
+                model.renameMeetingSpeaker(noteID: note.id, from: renameFrom, to: renameTo)
+                showRenameSheet = false
+            } onCancel: {
+                showRenameSheet = false
+            }
+        }
+    }
+
+    private func uniqueSpeakers(in note: MeetingNote) -> [String] {
+        note.segments.map(\.speaker).uniqued()
+    }
+
+    private func renameSuggestions(for note: MeetingNote) -> [String] {
+        (note.attendees + note.participantRoster + [note.remoteOneOnOneName].compactMap { $0 })
+            .uniqued()
+    }
+
+    private func overviewSection(_ note: MeetingNote) -> some View {
+        let overview: String = {
+            if note.processingState == .processing {
+                return note.processingMessage ?? "Generating overview…"
+            }
+            return note.summary.isEmpty ? "No summary yet." : note.summary
+        }()
+        let canCollapse = overview.count > 180 || overview.contains("\n")
+
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("Overview")
+                .font(.title3.weight(.semibold))
+            Text(overview)
+                .font(.system(size: 13))
+                .foregroundStyle(FlowTheme.ink.opacity(0.85))
+                .lineLimit(overviewExpanded || !canCollapse ? nil : 3)
+                .textSelection(.enabled)
+            if canCollapse {
+                Button(overviewExpanded ? "Show less" : "Show more") {
+                    overviewExpanded.toggle()
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .buttonStyle(.plain)
+                .foregroundStyle(FlowTheme.accent)
+            }
+        }
+    }
+
+    private func actionItemsSection(_ note: MeetingNote) -> some View {
+        let groups = ActionItemGroup.groups(from: note.actionItems)
+        let doneCount = note.actionItems.filter { ParsedActionItem.parse($0).isDone }.count
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Text("Action items")
+                    .font(.title3.weight(.semibold))
+                Text("\(note.actionItems.count)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(FlowTheme.ink.opacity(0.7))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(FlowTheme.accentSoft, in: Capsule())
+                if doneCount > 0 {
+                    Text("\(doneCount) done")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(FlowTheme.muted)
+                }
+                Spacer(minLength: 0)
+                Text("by assignee")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(FlowTheme.muted)
+            }
+
+            ForEach(groups) { group in
+                ActionItemGroupCard(
+                    group: group,
+                    rawItems: note.actionItems,
+                    candidates: assigneeOptions(for: note, including: group.assignee)
+                ) { index, updated in
+                    model.meetings.updateActionItem(id: note.id, index: index, text: updated)
+                }
+            }
+        }
+    }
+
+    private func assigneeOptions(for note: MeetingNote, including current: String?) -> [String] {
+        var options = note.actionItemAssigneeCandidates(including: model.project(for: note)?.people ?? [])
+        if let current, !current.isEmpty,
+           !options.contains(where: { $0.caseInsensitiveCompare(current) == .orderedSame }) {
+            options.append(current)
+        }
+        // Preserve ad-hoc labels like "Team" that appear on other items.
+        for raw in note.actionItems {
+            if let name = ParsedActionItem.parse(raw).assignee,
+               !options.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
+                options.append(name)
+            }
+        }
+        return options
     }
 
     private func section(_ title: String, _ body: String) -> some View {
@@ -2727,8 +3474,289 @@ struct MeetingDetailView: View {
         panel.nameFieldStringValue = "\(note.title).md"
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
-            try? note.markdownExport.write(to: url, atomically: true, encoding: .utf8)
+            try? model.markdownExport(for: note).write(to: url, atomically: true, encoding: .utf8)
         }
+    }
+}
+
+private struct RenameSpeakerSheet: View {
+    let speakers: [String]
+    let suggestions: [String]
+    @Binding var from: String
+    @Binding var to: String
+    let onApply: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Rename speaker")
+                .font(.system(size: 20, weight: .semibold))
+            Text("Applies to every matching line in this note. Manual renames are kept when you reprocess.")
+                .font(.system(size: 13))
+                .foregroundStyle(FlowTheme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Picker("Current label", selection: $from) {
+                ForEach(speakers, id: \.self) { name in
+                    Text(name).tag(name)
+                }
+            }
+
+            TextField("New name", text: $to)
+                .textFieldStyle(.roundedBorder)
+
+            if !suggestions.isEmpty {
+                Text("Suggestions")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(FlowTheme.muted)
+                FlowLayoutSuggestions(names: suggestions) { name in
+                    to = name
+                }
+            }
+
+            HStack {
+                Button("Cancel", action: onCancel)
+                Spacer()
+                Button("Apply to all") {
+                    onApply()
+                }
+                .disabled(to.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 420)
+    }
+}
+
+private struct FlowLayoutSuggestions: View {
+    let names: [String]
+    let onPick: (String) -> Void
+
+    var body: some View {
+        // Simple wrapping via flexible stack — keep quiet, no card chrome.
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(names.prefix(12)), id: \.self) { name in
+                Button(name) { onPick(name) }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(FlowTheme.solid)
+            }
+        }
+    }
+}
+
+private enum AssigneePersona {
+    struct Style {
+        let icon: String
+        let tint: Color
+        let soft: Color
+    }
+
+    private static let palette: [(icon: String, red: Double, green: Double, blue: Double)] = [
+        ("hare.fill", 0.91, 0.55, 0.38),
+        ("bird.fill", 0.42, 0.68, 0.84),
+        ("leaf.fill", 0.45, 0.72, 0.48),
+        ("flame.fill", 0.93, 0.46, 0.36),
+        ("bolt.fill", 0.94, 0.76, 0.30),
+        ("fish.fill", 0.38, 0.62, 0.78),
+        ("cat.fill", 0.78, 0.52, 0.84),
+        ("dog.fill", 0.72, 0.56, 0.40),
+        ("tortoise.fill", 0.40, 0.70, 0.56),
+        ("sparkles", 0.84, 0.62, 0.90),
+        ("moon.stars.fill", 0.55, 0.58, 0.88),
+        ("cup.and.saucer.fill", 0.70, 0.52, 0.40),
+        ("gamecontroller.fill", 0.48, 0.74, 0.58),
+        ("paintbrush.pointed.fill", 0.88, 0.48, 0.62),
+        ("carrot.fill", 0.95, 0.58, 0.32),
+        ("teddybear.fill", 0.82, 0.60, 0.46)
+    ]
+
+    static func style(for assignee: String?) -> Style {
+        guard let assignee, !assignee.isEmpty else {
+            return Style(
+                icon: "person.slash",
+                tint: FlowTheme.muted,
+                soft: FlowTheme.card.opacity(0.75)
+            )
+        }
+
+        if assignee.caseInsensitiveCompare("You") == .orderedSame {
+            let tint = Color(red: 0.95, green: 0.74, blue: 0.28)
+            return Style(icon: "star.fill", tint: tint, soft: tint.opacity(0.20))
+        }
+
+        let hash = assignee.lowercased().unicodeScalars.reduce(into: 0) { partial, scalar in
+            partial = partial &* 31 &+ Int(scalar.value)
+        }
+        let entry = palette[abs(hash) % palette.count]
+        let tint = Color(red: entry.red, green: entry.green, blue: entry.blue)
+        return Style(icon: entry.icon, tint: tint, soft: tint.opacity(0.18))
+    }
+}
+
+private struct ActionItemGroupCard: View {
+    let group: ActionItemGroup
+    let rawItems: [String]
+    let candidates: [String]
+    let onChange: (Int, String) -> Void
+
+    private var style: AssigneePersona.Style { AssigneePersona.style(for: group.assignee) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                AssigneeBadge(assignee: group.assignee, style: style)
+                Text(group.count == 1 ? "1 item" : "\(group.count) items")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(FlowTheme.muted)
+                Spacer(minLength: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(group.indices, id: \.self) { index in
+                    if rawItems.indices.contains(index) {
+                        ActionItemTaskRow(
+                            raw: rawItems[index],
+                            accent: style.tint,
+                            candidates: candidates
+                        ) { updated in
+                            onChange(index, updated)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(style.soft.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(style.tint.opacity(0.22), lineWidth: 1)
+        )
+    }
+}
+
+private struct AssigneeBadge: View {
+    let assignee: String?
+    let style: AssigneePersona.Style
+
+    private var label: String { assignee ?? ParsedActionItem.unassignedLabel }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: style.icon)
+                .font(.system(size: 11, weight: .semibold))
+            Text(label)
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(style.tint)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(style.soft, in: Capsule())
+        .overlay(Capsule().stroke(style.tint.opacity(0.28), lineWidth: 1))
+        .accessibilityLabel(label)
+    }
+}
+
+private struct ActionItemTaskRow: View {
+    let raw: String
+    let accent: Color
+    let candidates: [String]
+    let onChange: (String) -> Void
+
+    @State private var showingAddAssignee = false
+    @State private var draftAssignee = ""
+
+    private var parsed: ParsedActionItem { ParsedActionItem.parse(raw) }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Button {
+                onChange(ParsedActionItem.setDone(raw, done: !parsed.isDone))
+            } label: {
+                Image(systemName: parsed.isDone ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(parsed.isDone ? accent : accent.opacity(0.7))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 1)
+            .help(parsed.isDone ? "Mark not done" : "Mark done")
+            .accessibilityLabel(parsed.isDone ? "Completed" : "Not completed")
+            .accessibilityAddTraits(.isButton)
+
+            Text(parsed.task.isEmpty ? ParsedActionItem.strippingDoneMarker(raw) : parsed.task)
+                .font(.system(size: 14))
+                .foregroundStyle(FlowTheme.ink.opacity(parsed.isDone ? 0.42 : 0.92))
+                .strikethrough(parsed.isDone, color: FlowTheme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            reassignMenu
+        }
+        .animation(.easeOut(duration: 0.15), value: parsed.isDone)
+        .alert("Add assignee", isPresented: $showingAddAssignee) {
+            TextField("Name", text: $draftAssignee)
+            Button("Assign") {
+                commitDraftAssignee()
+            }
+            Button("Cancel", role: .cancel) {
+                draftAssignee = ""
+            }
+        } message: {
+            Text("Who should own this action item?")
+        }
+    }
+
+    private var reassignMenu: some View {
+        Menu {
+            Button(ParsedActionItem.unassignedLabel) {
+                assign(nil)
+            }
+            if !candidates.isEmpty {
+                Divider()
+            }
+            ForEach(candidates, id: \.self) { name in
+                Button(name) {
+                    assign(name)
+                }
+            }
+            Divider()
+            Button("Add assignee…") {
+                draftAssignee = ""
+                // The menu has to finish dismissing or the alert never appears.
+                DispatchQueue.main.async {
+                    showingAddAssignee = true
+                }
+            }
+        } label: {
+            Image(systemName: "person.badge.plus")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(FlowTheme.muted)
+                .frame(width: 24, height: 24)
+                .background(FlowTheme.card.opacity(0.7), in: Circle())
+                .overlay(Circle().stroke(FlowTheme.hairline, lineWidth: 1))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Assign this action item")
+    }
+
+    private func commitDraftAssignee() {
+        let typed = draftAssignee.trimmingCharacters(in: .whitespacesAndNewlines)
+        draftAssignee = ""
+        guard !typed.isEmpty else { return }
+        assign(ParsedActionItem.assigneeName(typed: typed))
+    }
+
+    private func assign(_ name: String?) {
+        let task = parsed.task.isEmpty ? ParsedActionItem.strippingDoneMarker(raw) : parsed.task
+        let next = ParsedActionItem.compose(task: task, assignee: name, done: parsed.isDone)
+        guard next != raw else { return }
+        onChange(next)
     }
 }
 
@@ -2742,14 +3770,31 @@ private struct SendActionItemsToRemindersSheet: View {
     @State private var isBusy = false
     @State private var didSucceed = false
 
-    private var itemCount: Int { note.actionItems.count }
+    private var openItems: [String] {
+        note.actionItems.filter { !ParsedActionItem.parse($0).isDone }
+    }
+
+    private var remindersSheetSummary: String {
+        if itemCount == 0 {
+            return "Every action item in “\(note.title)” is already checked off."
+        }
+        let noun = itemCount == 1 ? "action item" : "action items"
+        let skipped = note.actionItems.count - itemCount
+        if skipped > 0 {
+            return "Add \(itemCount) open \(noun) from “\(note.title)” to a list. Checked-off items are skipped."
+        }
+        return "Add \(itemCount) \(noun) from “\(note.title)” to a list."
+    }
+
+    private var itemCount: Int { openItems.count }
+    private var groups: [ActionItemGroup] { ActionItemGroup.groups(from: openItems) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Send to Reminders")
                 .font(.system(size: 20, weight: .semibold))
 
-            Text("Add \(itemCount) action item\(itemCount == 1 ? "" : "s") from “\(note.title)” to a list.")
+            Text(remindersSheetSummary)
                 .font(.system(size: 13))
                 .foregroundStyle(FlowTheme.muted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -2758,18 +3803,22 @@ private struct SendActionItemsToRemindersSheet: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Fn Dictate needs access to Reminders.")
                         .font(.system(size: 13))
-                    Button("Allow Reminders Access") {
-                        Task {
-                            let granted = await reminders.requestAccess()
-                            if granted {
-                                selectedListID = reminders.resolvedListID()
-                                statusMessage = nil
-                            } else {
-                                statusMessage = RemindersServiceError.notAuthorized.localizedDescription
-                            }
+                    if reminders.needsOpenSettings {
+                        Text(RemindersServiceError.notAuthorized.localizedDescription)
+                            .font(.system(size: 12))
+                            .foregroundStyle(FlowTheme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Open Reminders Settings") {
+                            reminders.openRemindersSettings()
                         }
+                        .keyboardShortcut(.defaultAction)
+                    } else {
+                        Button(isBusy ? "Waiting for permission…" : "Allow Reminders Access") {
+                            Task { await requestRemindersAccess() }
+                        }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(isBusy)
                     }
-                    .keyboardShortcut(.defaultAction)
                 }
             } else if reminders.lists.isEmpty {
                 Text(RemindersServiceError.noWritableLists.localizedDescription)
@@ -2787,26 +3836,7 @@ private struct SendActionItemsToRemindersSheet: View {
                 .labelsHidden()
                 .pickerStyle(.menu)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(note.actionItems.prefix(6).enumerated()), id: \.offset) { _, item in
-                        Text("• \(item)")
-                            .font(.system(size: 12))
-                            .foregroundStyle(FlowTheme.ink.opacity(0.85))
-                            .lineLimit(2)
-                    }
-                    if note.actionItems.count > 6 {
-                        Text("+\(note.actionItems.count - 6) more")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(FlowTheme.muted)
-                    }
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(FlowTheme.card.opacity(0.7), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(FlowTheme.hairline, lineWidth: 1)
-                )
+                consolidatedPreview
             }
 
             if let statusMessage {
@@ -2829,7 +3859,7 @@ private struct SendActionItemsToRemindersSheet: View {
                         }
                     }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(isBusy || (selectedListID ?? reminders.resolvedListID()) == nil)
+                    .disabled(isBusy || itemCount == 0 || (selectedListID ?? reminders.resolvedListID()) == nil)
                 }
             }
         }
@@ -2837,16 +3867,93 @@ private struct SendActionItemsToRemindersSheet: View {
         .frame(width: 420)
         .background(FlowTheme.cream)
         .task {
+            // Refresh only — do not auto-prompt. Requesting behind this sheet can hide
+            // the system dialog and leave the UI stuck on “Allow Reminders Access”.
             reminders.refreshStatus()
             if reminders.isAuthorized {
                 reminders.reloadLists()
                 selectedListID = reminders.resolvedListID()
-            } else {
-                let granted = await reminders.requestAccess()
-                if granted {
-                    selectedListID = reminders.resolvedListID()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // User may have flipped the toggle in System Settings while this sheet is open.
+            reminders.refreshStatus()
+            if reminders.isAuthorized {
+                reminders.reloadLists()
+                selectedListID = reminders.resolvedListID() ?? selectedListID
+                statusMessage = nil
+            }
+        }
+    }
+
+    private var consolidatedPreview: some View {
+        let previewLimit = 8
+        var remaining = previewLimit
+        var rows: [(group: ActionItemGroup, tasks: [String])] = []
+        for group in groups {
+            guard remaining > 0 else { break }
+            let tasks = group.indices.compactMap { index -> String? in
+                guard openItems.indices.contains(index) else { return nil }
+                let parsed = ParsedActionItem.parse(openItems[index])
+                return parsed.task.isEmpty ? openItems[index] : parsed.task
+            }
+            let slice = Array(tasks.prefix(remaining))
+            remaining -= slice.count
+            rows.append((group, slice))
+        }
+
+        return VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                let style = AssigneePersona.style(for: row.group.assignee)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Image(systemName: style.icon)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(style.tint)
+                        Text(row.group.displayName)
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("\(row.group.count)")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(style.tint)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(style.soft, in: Capsule())
+                    }
+                    ForEach(Array(row.tasks.enumerated()), id: \.offset) { _, task in
+                        Text("• \(task)")
+                            .font(.system(size: 12))
+                            .foregroundStyle(FlowTheme.ink.opacity(0.85))
+                            .lineLimit(2)
+                    }
                 }
             }
+            if itemCount > previewLimit {
+                Text("+\(itemCount - previewLimit) more")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(FlowTheme.muted)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(FlowTheme.card.opacity(0.7), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(FlowTheme.hairline, lineWidth: 1)
+        )
+    }
+
+    private func requestRemindersAccess() async {
+        isBusy = true
+        statusMessage = nil
+        defer { isBusy = false }
+        let granted = await reminders.requestAccess()
+        if granted {
+            selectedListID = reminders.resolvedListID()
+            statusMessage = nil
+        } else if reminders.needsOpenSettings {
+            statusMessage = RemindersServiceError.notAuthorized.localizedDescription
+        } else {
+            statusMessage = RemindersServiceError.notAuthorized.localizedDescription
         }
     }
 
@@ -2857,7 +3964,7 @@ private struct SendActionItemsToRemindersSheet: View {
         defer { isBusy = false }
         do {
             let count = try reminders.addActionItems(
-                note.actionItems,
+                openItems,
                 toListID: listID,
                 meetingTitle: note.title
             )
@@ -2868,5 +3975,64 @@ private struct SendActionItemsToRemindersSheet: View {
             didSucceed = false
             statusMessage = error.localizedDescription
         }
+    }
+}
+
+private struct VoiceSpeakerLabel: View {
+    let speaker: String
+    let voiceID: UUID?
+    var fontSize: CGFloat = 12
+    var width: CGFloat = 96
+    var onRename: (UUID, String) -> Void
+
+    @State private var isEditing = false
+    @State private var draft = ""
+
+    private var canRename: Bool {
+        voiceID != nil && speaker.caseInsensitiveCompare("You") != .orderedSame
+    }
+
+    var body: some View {
+        Text(speaker)
+            .font(.system(size: fontSize, weight: .semibold))
+            .foregroundStyle(FlowTheme.muted)
+            .lineLimit(2)
+            .multilineTextAlignment(.leading)
+            .frame(width: width, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                guard canRename else { return }
+                draft = VoiceProfile.isGeneric(speaker) ? "" : speaker
+                isEditing = true
+            }
+            .help(canRename ? "Name this voice — remembered in later meetings" : "")
+            .popover(isPresented: $isEditing, arrowEdge: .trailing) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Who is this?")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Saved on this Mac and used in future meetings.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(FlowTheme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    TextField("Name", text: $draft, prompt: Text(speaker))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 200)
+                        .onSubmit(commit)
+                    HStack {
+                        Spacer()
+                        Button("Save", action: commit)
+                            .keyboardShortcut(.defaultAction)
+                    }
+                }
+                .padding(12)
+            }
+    }
+
+    private func commit() {
+        guard let voiceID else { return }
+        let name = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        onRename(voiceID, name)
+        isEditing = false
     }
 }
