@@ -17,6 +17,20 @@ final class AppModel {
     var phase: Phase = .idle
     var partialText = ""
     var audioLevel: Float = 0
+    /// System-audio (Others) level for dual-channel live chrome.
+    var remoteAudioLevel: Float = 0
+    /// Which meeting channel is currently "hot" for UI (nil when idle / both quiet).
+    var activeMeetingChannel: MeetingChannel?
+    /// Live Accessibility roster names (best-effort).
+    var liveParticipantRoster: [String] = []
+    /// Display label for the remote channel ("Others" or calendar 1:1 name).
+    var remoteSpeakerLabel = "Others"
+
+    enum MeetingChannel: Equatable, Sendable {
+        case you
+        case others
+    }
+
     var statusMessage = "Hold Fn · double-tap hands-free"
     enum LibraryTab: Equatable {
         case dictations
@@ -116,6 +130,11 @@ final class AppModel {
     private var recordingMeetingAppName: String?
     /// In-flight note refinement tasks (stop + manual retry).
     private var meetingRefineTasks: [UUID: Task<Void, Never>] = [:]
+    /// Polls Accessibility for participant tiles during an active meeting.
+    private var rosterPollTask: Task<Void, Never>?
+    /// Decay remote level when buffers pause.
+    private var lastYouSpeechAt: Date?
+    private var lastOthersSpeechAt: Date?
 
     private var hasCompletedSetup: Bool {
         get { UserDefaults.standard.bool(forKey: setupCompletedKey) }
@@ -753,6 +772,9 @@ final class AppModel {
         activeMeetingPartialYou = ""
         activeMeetingPartialOthers = ""
         activeMeetingSystemAudioFailed = false
+        remoteAudioLevel = 0
+        activeMeetingChannel = nil
+        liveParticipantRoster = []
         meetingStartedAt = .now
 
         refreshUpcomingCalendar()
@@ -760,6 +782,8 @@ final class AppModel {
         let title = cal?.title
             ?? "Meeting \(Date().formatted(date: .abbreviated, time: .shortened))"
         let attendees = cal?.attendees ?? []
+        let oneOnOne = cal?.remoteOneOnOneName
+        remoteSpeakerLabel = oneOnOne ?? "Others"
 
         let note = MeetingNote(
             title: title,
@@ -768,7 +792,9 @@ final class AppModel {
             calendarEventIdentifier: cal?.eventIdentifier,
             calendarTitle: cal?.title,
             brief: upcomingBrief,
-            processingState: .idle
+            processingState: .idle,
+            sourceAppName: detectedMeeting?.appName,
+            remoteOneOnOneName: oneOnOne
         )
         meetings.upsert(note)
         activeMeetingID = note.id
@@ -783,6 +809,7 @@ final class AppModel {
         requestedLibraryTab = .meetings
         showLibrary = true
         presentLibraryWindow()
+        startRosterPolling()
 
         let hints = meetingHints(attendees: attendees)
 
@@ -807,6 +834,7 @@ final class AppModel {
             mic.onLevel = { [weak self] level in
                 Task { @MainActor in
                     self?.audioLevel = level
+                    self?.noteChannelActivity(youLevel: level, othersLevel: nil)
                 }
             }
             try mic.start()
@@ -821,6 +849,7 @@ final class AppModel {
                    let remote = speechRemote,
                    remote !== speech
                 {
+                    let remoteLabel = remoteSpeakerLabel
                     await remote.setPartialHandler { [weak self] text in
                         Task { @MainActor in
                             self?.activeMeetingPartialOthers = text
@@ -829,7 +858,7 @@ final class AppModel {
                     }
                     await remote.setFinalSegmentHandler { [weak self] text, offset in
                         Task { @MainActor in
-                            self?.appendMeetingSegment(text: text, offset: offset, speaker: "Others")
+                            self?.appendMeetingSegment(text: text, offset: offset, speaker: remoteLabel)
                         }
                     }
                     try await remote.startSession(contextualStrings: hints)
@@ -838,6 +867,12 @@ final class AppModel {
                     capture.onBuffer = { buffer in
                         let packet = SendablePCMBuffer(buffer: buffer)
                         Task { await remote.append(packet) }
+                    }
+                    capture.onLevel = { [weak self] level in
+                        Task { @MainActor in
+                            self?.remoteAudioLevel = level
+                            self?.noteChannelActivity(youLevel: nil, othersLevel: level)
+                        }
                     }
                     do {
                         try await capture.start()
@@ -871,8 +906,11 @@ final class AppModel {
         statusMessage = statusMessage.hasPrefix("Meeting ended")
             ? statusMessage
             : "Saving meeting…"
+        stopRosterPolling()
         mic.stop()
         audioLevel = 0
+        remoteAudioLevel = 0
+        activeMeetingChannel = nil
         let capture = systemAudio
         systemAudio = nil
         if let capture {
@@ -901,7 +939,18 @@ final class AppModel {
 
         var note = meetings.notes.first(where: { $0.id == id }) ?? MeetingNote(id: id)
         note.systemAudioCaptureFailed = note.systemAudioCaptureFailed || activeMeetingSystemAudioFailed
-        mergeLeftoverMeetingText(into: &note, youText: youText, othersText: othersText)
+        // Fold leftover finish() text using the live remote label (1:1 name or Others).
+        mergeLeftoverMeetingText(
+            into: &note,
+            youText: youText,
+            othersText: othersText,
+            remoteSpeaker: note.remoteOneOnOneName ?? "Others"
+        )
+
+        // Snapshot latest roster onto the note before refine.
+        if !liveParticipantRoster.isEmpty {
+            note.participantRoster = liveParticipantRoster
+        }
 
         let rawLabeled = note.labeledTranscript.isEmpty
             ? [youText, othersText].filter { !$0.isEmpty }.joined(separator: "\n")
@@ -918,6 +967,8 @@ final class AppModel {
         meetingStartedAt = nil
         recordingMeetingAppName = nil
         activeMeetingSystemAudioFailed = false
+        liveParticipantRoster = []
+        remoteSpeakerLabel = "Others"
         highlightedMeetingID = note.id
         requestedLibraryTab = .meetings
         showLibrary = true
@@ -960,7 +1011,10 @@ final class AppModel {
             segments: note.segments,
             attendees: note.attendees,
             calendarTitle: note.calendarTitle,
-            dictionaryHints: Array(dictionary.preferredSpellings.prefix(40))
+            dictionaryHints: Array(dictionary.preferredSpellings.prefix(40)),
+            rosterNames: note.participantRoster,
+            lockedSpeakerRenames: note.lockedSpeakerRenames,
+            remoteOneOnOneName: note.remoteOneOnOneName
         )
         guard !Task.isCancelled else { return }
         guard meetings.notes.contains(where: { $0.id == id }) else { return }
@@ -980,14 +1034,32 @@ final class AppModel {
             note.segments = refined.segments
         }
 
+        // Re-apply locked renames + merge Voice N / casing after any model output.
+        let hints = SpeakerLabelNormalizer.IdentityHints(
+            calendarAttendees: note.attendees,
+            rosterNames: note.participantRoster,
+            lockedRenames: note.lockedSpeakerRenames,
+            remoteOneOnOneName: note.remoteOneOnOneName
+        )
+        let merged = SpeakerLabelNormalizer.normalizeNoteFields(
+            segments: note.segments,
+            transcript: note.transcript,
+            hints: hints
+        )
+        note.segments = merged.segments
+        note.transcript = merged.transcript
+
         var message = result.message
         let speakers = Set(note.segments.map(\.speaker))
+        let hasRemote = speakers.contains(where: {
+            $0 != "You" && !$0.isEmpty
+        })
         if note.includeSystemAudio,
-           (note.systemAudioCaptureFailed || (!speakers.contains("Others") && speakers == ["You"]))
+           (note.systemAudioCaptureFailed || (!hasRemote && speakers == ["You"]))
         {
             let speakerHint = note.systemAudioCaptureFailed
                 ? "System audio wasn't captured — only your mic is labeled. Enable Screen Recording and retry, or connect Calendar so names can be inferred."
-                : "No separate “Others” audio was captured (headphones/system audio). Connect Calendar so speaker names can be inferred from context."
+                : "No separate remote audio was captured (headphones/system audio). Connect Calendar so speaker names can be inferred from context."
             if message == nil || result.usedAppleIntelligence {
                 message = speakerHint
             }
@@ -1019,7 +1091,8 @@ final class AppModel {
     private func mergeLeftoverMeetingText(
         into note: inout MeetingNote,
         youText: String,
-        othersText: String
+        othersText: String,
+        remoteSpeaker: String = "Others"
     ) {
         if note.segments.isEmpty {
             var segs: [MeetingTranscriptSegment] = []
@@ -1027,13 +1100,15 @@ final class AppModel {
                 segs.append(MeetingTranscriptSegment(startOffset: 0, text: youText, speaker: "You"))
             }
             if !othersText.isEmpty {
-                segs.append(MeetingTranscriptSegment(startOffset: 0.1, text: othersText, speaker: "Others"))
+                segs.append(
+                    MeetingTranscriptSegment(startOffset: 0.1, text: othersText, speaker: remoteSpeaker)
+                )
             }
             note.segments = segs
             return
         }
 
-        // If the Others channel never emitted segments, fold finish() text in.
+        // If the remote channel never emitted segments, fold finish() text in.
         if !othersText.isEmpty {
             let othersJoined = note.segments
                 .filter { $0.speaker != "You" }
@@ -1045,7 +1120,7 @@ final class AppModel {
                     MeetingTranscriptSegment(
                         startOffset: lastOffset + 0.1,
                         text: dictionary.apply(to: othersText),
-                        speaker: "Others"
+                        speaker: remoteSpeaker
                     )
                 )
             }
@@ -1054,8 +1129,11 @@ final class AppModel {
     }
 
     private func cancelMeetingRecording() async {
+        stopRosterPolling()
         mic.stop()
         audioLevel = 0
+        remoteAudioLevel = 0
+        activeMeetingChannel = nil
         let capture = systemAudio
         systemAudio = nil
         if let capture {
@@ -1084,6 +1162,8 @@ final class AppModel {
         meetingStartedAt = nil
         recordingMeetingAppName = nil
         activeMeetingSystemAudioFailed = false
+        liveParticipantRoster = []
+        remoteSpeakerLabel = "Others"
         phase = .idle
         statusMessage = idleStatus
         partialText = ""
@@ -1103,13 +1183,18 @@ final class AppModel {
         meetings.appendSegment(id: id, segment: segment)
         if speaker == "You" {
             activeMeetingPartialYou = ""
+            lastYouSpeechAt = .now
+            activeMeetingChannel = .you
         } else {
             activeMeetingPartialOthers = ""
+            lastOthersSpeechAt = .now
+            activeMeetingChannel = .others
         }
         refreshMeetingPartialDisplay()
     }
 
     private func refreshMeetingPartialDisplay() {
+        let remoteLabel = remoteSpeakerLabel
         let parts = [activeMeetingPartialYou, activeMeetingPartialOthers]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -1118,11 +1203,63 @@ final class AppModel {
             let base = meetings.notes.first(where: { $0.id == id })?.labeledTranscript ?? ""
             let live = [
                 activeMeetingPartialYou.isEmpty ? nil : "[You] \(activeMeetingPartialYou)",
-                activeMeetingPartialOthers.isEmpty ? nil : "[Others] \(activeMeetingPartialOthers)"
+                activeMeetingPartialOthers.isEmpty ? nil : "[\(remoteLabel)] \(activeMeetingPartialOthers)"
             ].compactMap { $0 }.joined(separator: "\n")
             let combined = [base, live].filter { !$0.isEmpty }.joined(separator: "\n")
             meetings.updateTranscript(id: id, transcript: combined)
         }
+    }
+
+    private func noteChannelActivity(youLevel: Float?, othersLevel: Float?) {
+        let threshold: Float = 0.12
+        if let youLevel, youLevel >= threshold {
+            lastYouSpeechAt = .now
+        }
+        if let othersLevel, othersLevel >= threshold {
+            lastOthersSpeechAt = .now
+        }
+        let youRecent = lastYouSpeechAt.map { Date().timeIntervalSince($0) < 0.7 } ?? false
+        let othersRecent = lastOthersSpeechAt.map { Date().timeIntervalSince($0) < 0.7 } ?? false
+        if youRecent && othersRecent {
+            // Prefer the louder channel when both are hot.
+            activeMeetingChannel = (youLevel ?? audioLevel) >= (othersLevel ?? remoteAudioLevel)
+                ? .you : .others
+        } else if youRecent {
+            activeMeetingChannel = .you
+        } else if othersRecent {
+            activeMeetingChannel = .others
+        } else if (youLevel ?? 0) < threshold && (othersLevel ?? 0) < threshold {
+            activeMeetingChannel = nil
+        }
+    }
+
+    private func startRosterPolling() {
+        stopRosterPolling()
+        rosterPollTask = Task { @MainActor [weak self] in
+            while let self, !Task.isCancelled, self.phase == .meetingRecording {
+                let roster = MeetingParticipantReader.readRoster(
+                    preferredAppName: self.recordingMeetingAppName ?? self.detectedMeeting?.appName,
+                    preferredBundleID: self.detectedMeeting?.bundleID
+                )
+                if !roster.names.isEmpty {
+                    self.liveParticipantRoster = roster.names
+                    if let id = self.activeMeetingID {
+                        self.meetings.updateParticipantRoster(id: id, names: roster.names)
+                    }
+                }
+                try? await Task.sleep(for: .seconds(8))
+            }
+        }
+    }
+
+    private func stopRosterPolling() {
+        rosterPollTask?.cancel()
+        rosterPollTask = nil
+    }
+
+    /// Rename-once: apply a speaker label across the whole transcript and lock it.
+    func renameMeetingSpeaker(noteID: UUID, from: String, to: String) {
+        meetings.renameSpeaker(id: noteID, from: from, to: to)
     }
 
     private func meetingHints(attendees: [String]) -> [String] {

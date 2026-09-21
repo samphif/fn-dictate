@@ -243,26 +243,34 @@ final class MeetingDetector {
         for window in windows {
             let title = window.title
             guard !title.isEmpty else { continue }
+            let ownerBundleID = bundleID(forPID: window.ownerPID)
 
             if Self.meetsBrowserMeet(title),
-               let bid = bundleID(forPID: window.ownerPID),
+               let bid = ownerBundleID,
                browserBundleIDs.contains(bid)
             {
                 return DetectedMeeting(appName: "Google Meet", bundleID: bid, detail: title)
+            }
+            // Teams in Edge/Chrome: URL or call chrome in the tab title.
+            if let bid = ownerBundleID,
+               browserBundleIDs.contains(bid),
+               Self.looksLikeBrowserTeamsCall(title)
+            {
+                return DetectedMeeting(appName: "Teams", bundleID: bid, detail: title)
             }
             if title.localizedCaseInsensitiveContains("Zoom Meeting")
                 || title.localizedCaseInsensitiveContains("Zoom Webinar")
             {
                 return DetectedMeeting(
                     appName: "Zoom",
-                    bundleID: bundleID(forPID: window.ownerPID) ?? "us.zoom.xos",
+                    bundleID: ownerBundleID ?? "us.zoom.xos",
                     detail: title
                 )
             }
             if Self.looksLikeTeamsCallTitle(title) {
                 return DetectedMeeting(
                     appName: "Teams",
-                    bundleID: bundleID(forPID: window.ownerPID) ?? "com.microsoft.teams2",
+                    bundleID: ownerBundleID ?? "com.microsoft.teams2",
                     detail: title
                 )
             }
@@ -337,6 +345,22 @@ final class MeetingDetector {
             || lower.hasPrefix("meet -")
             || lower.contains("google meet")
             || lower.contains(" · meet")
+    }
+
+    /// Teams web call in a browser tab (Edge/Chrome/…).
+    private static func looksLikeBrowserTeamsCall(_ title: String) -> Bool {
+        if isTeamsNonCallChrome(title) { return false }
+        let lower = title.lowercased()
+        let hostsTeams =
+            lower.contains("teams.microsoft.com")
+            || lower.contains("teams.live.com")
+            || lower.contains("microsoft teams")
+        guard hostsTeams else { return false }
+        // Prefer strong call signals; also accept "| Microsoft Teams" with meeting wording.
+        if looksLikeTeamsCallTitle(title) { return true }
+        if lower.contains(" | meeting") || lower.contains("meeting |") { return true }
+        if lower.contains("/meetup-join") || lower.contains("meetup-join") { return true }
+        return false
     }
 
     private static func appFamily(for bundleID: String, appName: String?) -> String {

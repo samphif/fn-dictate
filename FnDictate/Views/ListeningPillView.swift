@@ -54,23 +54,45 @@ struct ListeningPillView: View {
             // Grip + collapse: drag handle interprets short click as collapse.
             ZStack {
                 WindowDragHandle(onClick: { model.collapseListeningPill() })
-                VoiceWaveformView(
-                    level: model.audioLevel,
-                    isActive: isLive,
-                    tint: indicatorColor
-                )
-                .frame(width: 44, height: 36)
-                .allowsHitTesting(false)
+                if model.phase == .meetingRecording {
+                    MeetingDualWaveformView(
+                        youLevel: model.audioLevel,
+                        othersLevel: model.remoteAudioLevel,
+                        activeChannel: model.activeMeetingChannel,
+                        remoteLabel: model.remoteSpeakerLabel
+                    )
+                    .frame(width: 72, height: 36)
+                    .allowsHitTesting(false)
+                } else {
+                    VoiceWaveformView(
+                        level: model.audioLevel,
+                        isActive: isLive,
+                        tint: indicatorColor
+                    )
+                    .frame(width: 44, height: 36)
+                    .allowsHitTesting(false)
+                }
             }
-            .frame(width: 44, height: 36)
+            .frame(width: model.phase == .meetingRecording ? 72 : 44, height: 36)
             .help("Drag to move · click to collapse")
 
             HStack(alignment: .top, spacing: 8) {
-                ScrollingTranscriptView(
-                    text: displayText,
-                    isLive: isLive
-                )
-                .frame(maxWidth: .infinity, minHeight: 28, maxHeight: 48, alignment: .topLeading)
+                VStack(alignment: .leading, spacing: 4) {
+                    if model.phase == .meetingRecording {
+                        MeetingChannelChips(
+                            activeChannel: model.activeMeetingChannel,
+                            remoteLabel: model.remoteSpeakerLabel,
+                            systemAudioFailed: model.activeMeetingID.flatMap { id in
+                                model.meetings.notes.first(where: { $0.id == id })?.systemAudioCaptureFailed
+                            } ?? false
+                        )
+                    }
+                    ScrollingTranscriptView(
+                        text: displayText,
+                        isLive: isLive
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 28, maxHeight: 48, alignment: .topLeading)
+                }
 
                 if model.phase == .listening, model.currentTone != .raw {
                     ToneChipButton(tone: model.currentTone) {
@@ -81,7 +103,7 @@ struct ListeningPillView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .frame(width: 380)
+        .frame(width: model.phase == .meetingRecording ? 420 : 380)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
@@ -190,6 +212,62 @@ struct VoiceWaveformView: View {
         let speech = CGFloat(max(0.05, min(1, level)))
         let height = base + maxExtra * (0.25 * CGFloat(wobble) + 0.75 * speech * CGFloat(0.55 + 0.45 * wobble))
         return height
+    }
+}
+
+/// Compact You | Others meters for meeting capture.
+private struct MeetingDualWaveformView: View {
+    let youLevel: Float
+    let othersLevel: Float
+    let activeChannel: AppModel.MeetingChannel?
+    let remoteLabel: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            VoiceWaveformView(
+                level: youLevel,
+                isActive: true,
+                tint: activeChannel == .you ? Color.white : Color.white.opacity(0.45)
+            )
+            .frame(width: 28)
+            VoiceWaveformView(
+                level: othersLevel,
+                isActive: true,
+                tint: activeChannel == .others ? Color.cyan : Color.white.opacity(0.35)
+            )
+            .frame(width: 28)
+        }
+        .help("You · \(remoteLabel)")
+    }
+}
+
+private struct MeetingChannelChips: View {
+    let activeChannel: AppModel.MeetingChannel?
+    let remoteLabel: String
+    let systemAudioFailed: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            chip("You", hot: activeChannel == .you, tint: .white)
+            chip(remoteLabel, hot: activeChannel == .others, tint: .cyan)
+            if systemAudioFailed {
+                Text("Mic only")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.orange.opacity(0.95))
+            }
+        }
+    }
+
+    private func chip(_ title: String, hot: Bool, tint: Color) -> some View {
+        Text(title)
+            .font(.system(size: 9, weight: .semibold, design: .rounded))
+            .foregroundStyle(hot ? tint : .white.opacity(0.45))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(hot ? 0.18 : 0.08))
+            )
     }
 }
 

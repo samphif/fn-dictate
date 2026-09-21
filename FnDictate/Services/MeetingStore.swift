@@ -39,6 +39,34 @@ final class MeetingStore {
         save(exportAgent: false)
     }
 
+    /// Rename every segment with `from` speaker to `to`, lock the mapping against re-refine overwrite.
+    func renameSpeaker(id: UUID, from: String, to: String) {
+        let trimmedFrom = from.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTo = to.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedFrom.isEmpty, !trimmedTo.isEmpty, trimmedFrom != trimmedTo else { return }
+        guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
+
+        notes[index].lockedSpeakerRenames[trimmedFrom] = trimmedTo
+        // Also lock case-insensitive matches already present.
+        for seg in notes[index].segments where seg.speaker.compare(trimmedFrom, options: .caseInsensitive) == .orderedSame {
+            notes[index].lockedSpeakerRenames[seg.speaker] = trimmedTo
+        }
+
+        for i in notes[index].segments.indices {
+            if notes[index].segments[i].speaker.compare(trimmedFrom, options: .caseInsensitive) == .orderedSame {
+                notes[index].segments[i].speaker = trimmedTo
+            }
+        }
+        notes[index].transcript = notes[index].labeledTranscript
+        save()
+    }
+
+    func updateParticipantRoster(id: UUID, names: [String]) {
+        guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
+        notes[index].participantRoster = names
+        save(exportAgent: false)
+    }
+
     func updateCatchUp(id: UUID, text: String) {
         guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
         notes[index].catchUp = text

@@ -7,6 +7,8 @@ import ScreenCaptureKit
 final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private var stream: SCStream?
     var onBuffer: ((AVAudioPCMBuffer) -> Void)?
+    /// Normalized 0...1 peak level for remote (Others) UI waveform.
+    var onLevel: ((Float) -> Void)?
 
     func start() async throws {
         let content: SCShareableContent
@@ -40,12 +42,16 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unc
         guard let stream else { return }
         try? await stream.stopCapture()
         self.stream = nil
+        onLevel?(0)
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio else { return }
         guard let buffer = Self.makePCMBuffer(from: sampleBuffer) else { return }
         onBuffer?(buffer)
+        if let level = AudioLevel.normalized(from: buffer) {
+            onLevel?(level)
+        }
     }
 
     private static func makePCMBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {

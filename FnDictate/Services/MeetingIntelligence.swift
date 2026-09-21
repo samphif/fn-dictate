@@ -32,42 +32,75 @@ struct MeetingIntelligence: Sendable {
         segments: [MeetingTranscriptSegment],
         attendees: [String],
         calendarTitle: String?,
-        dictionaryHints: [String]
+        dictionaryHints: [String],
+        rosterNames: [String] = [],
+        lockedSpeakerRenames: [String: String] = [:],
+        remoteOneOnOneName: String? = nil
     ) async -> RefineResult {
         let labeled = labeledBody(transcript: transcript, segments: segments)
         let availabilityMessage = appleIntelligenceUnavailableReason()
+        let identityHints = SpeakerLabelNormalizer.IdentityHints(
+            calendarAttendees: attendees,
+            rosterNames: rosterNames,
+            lockedRenames: lockedSpeakerRenames,
+            remoteOneOnOneName: remoteOneOnOneName
+        )
 
         #if canImport(FoundationModels)
         if #available(macOS 26, *), availabilityMessage == nil {
-            if let smart = await smartRefineLongMeeting(
+            if var smart = await smartRefineLongMeeting(
                 labeled: labeled,
                 segments: segments,
                 attendees: attendees,
                 calendarTitle: calendarTitle,
-                dictionaryHints: dictionaryHints
+                dictionaryHints: dictionaryHints,
+                rosterNames: rosterNames
             ) {
+                let merged = SpeakerLabelNormalizer.normalizeNoteFields(
+                    segments: smart.segments.isEmpty ? segments : smart.segments,
+                    transcript: smart.transcript.isEmpty ? labeled : smart.transcript,
+                    hints: identityHints
+                )
+                smart.segments = merged.segments
+                smart.transcript = merged.transcript
                 return RefineResult(
                     meeting: smart,
                     usedAppleIntelligence: true,
                     message: nil
                 )
             }
-            return fallbackResult(
+            var fallback = fallbackResult(
                 labeled: labeled,
                 segments: segments,
                 calendarTitle: calendarTitle,
                 message: "Apple Intelligence couldn't finish summarizing this meeting. You can retry."
             )
+            let merged = SpeakerLabelNormalizer.normalizeNoteFields(
+                segments: fallback.meeting.segments,
+                transcript: fallback.meeting.transcript,
+                hints: identityHints
+            )
+            fallback.meeting.segments = merged.segments
+            fallback.meeting.transcript = merged.transcript
+            return fallback
         }
         #endif
 
-        return fallbackResult(
+        var fallback = fallbackResult(
             labeled: labeled,
             segments: segments,
             calendarTitle: calendarTitle,
             message: availabilityMessage
                 ?? "Apple Intelligence unavailable — showing a short transcript preview."
         )
+        let merged = SpeakerLabelNormalizer.normalizeNoteFields(
+            segments: fallback.meeting.segments,
+            transcript: fallback.meeting.transcript,
+            hints: identityHints
+        )
+        fallback.meeting.segments = merged.segments
+        fallback.meeting.transcript = merged.transcript
+        return fallback
     }
 
     func catchUp(
@@ -283,9 +316,10 @@ struct MeetingIntelligence: Sendable {
         segments: [MeetingTranscriptSegment],
         attendees: [String],
         calendarTitle: String?,
-        dictionaryHints: [String]
+        dictionaryHints: [String],
+        rosterNames: [String]
     ) async -> RefinedMeeting? {
-        let people = attendees.isEmpty ? "unknown" : attendees.joined(separator: ", ")
+        let people = knownPeopleList(attendees: attendees, rosterNames: rosterNames)
         let terms = dictionaryHints.prefix(40).joined(separator: ", ")
 
         let notes: RefinedMeeting?
@@ -293,6 +327,7 @@ struct MeetingIntelligence: Sendable {
             notes = await smartRefineSinglePass(
                 labeled: labeled,
                 attendees: attendees,
+                rosterNames: rosterNames,
                 calendarTitle: calendarTitle,
                 dictionaryHints: dictionaryHints,
                 includeTranscriptRewrite: labeled.count <= 3_500
@@ -311,7 +346,8 @@ struct MeetingIntelligence: Sendable {
 
         let relabeled = await relabelSpeakers(
             segments: segments.isEmpty ? refined.segments : segments,
-            attendees: attendees
+            attendees: attendees,
+            rosterNames: rosterNames
         )
         if !relabeled.isEmpty {
             refined.segments = relabeled
@@ -329,15 +365,21 @@ struct MeetingIntelligence: Sendable {
         return refined
     }
 
+    private func knownPeopleList(attendees: [String], rosterNames: [String]) -> String {
+        let merged = (attendees + rosterNames).uniqued()
+        return merged.isEmpty ? "unknown" : merged.joined(separator: ", ")
+    }
+
     @available(macOS 26, *)
     private func smartRefineSinglePass(
         labeled: String,
         attendees: [String],
+        rosterNames: [String],
         calendarTitle: String?,
         dictionaryHints: [String],
         includeTranscriptRewrite: Bool
     ) async -> RefinedMeeting? {
-        let people = attendees.isEmpty ? "unknown" : attendees.joined(separator: ", ")
+        let people = knownPeopleList(attendees: attendees, rosterNames: rosterNames)
         let terms = dictionaryHints.prefix(40).joined(separator: ", ")
         let transcriptBlock = includeTranscriptRewrite
             ? """
@@ -352,13 +394,15 @@ struct MeetingIntelligence: Sendable {
         let prompt = """
         Refine this meeting transcript into structured personal notes.
 
-        Known attendees (prefer these spellings for speaker labels): \(people)
+        Known attendees / participants (prefer these spellings for speaker labels): \(people)
         Calendar title hint: \(calendarTitle ?? "n/a")
         Preferred spellings / jargon: \(terms.isEmpty ? "n/a" : terms)
 
         Rules:
         - Keep [You] for the local participant.
-        - Relabel [Others] (or mislabeled lines) to a real attendee name when the transcript strongly implies who spoke; otherwise keep [Others] or [You].
+        - Relabel [Others] (or mislabeled lines) to a real known name when the transcript strongly implies who spoke; otherwise keep [Others] or [You].
+        - NEVER invent Voice N / Speaker N labels. Do not over-split speakers. Prefer merging uncertain remote speech under [Others] over inventing new anonymous voices.
+        - Use one canonical spelling per person (match Known attendees / participants; never emit casing duplicates).
         - Extract concrete action items with owners when known — even if worded casually ("I'll send…", "can you…").
         - Prefer useful key points over filler. Do not invent facts that aren't supported.
 
@@ -378,7 +422,7 @@ struct MeetingIntelligence: Sendable {
         """
 
         guard let content = await self.prompt(
-            instructions: "You write accurate personal meeting notes. Follow the requested format exactly.",
+            instructions: "You write accurate personal meeting notes. Follow the requested format exactly. Never invent Voice/Speaker N labels.",
             user: prompt
         ) else { return nil }
 
@@ -469,14 +513,17 @@ struct MeetingIntelligence: Sendable {
     @available(macOS 26, *)
     private func relabelSpeakers(
         segments: [MeetingTranscriptSegment],
-        attendees: [String]
+        attendees: [String],
+        rosterNames: [String]
     ) async -> [MeetingTranscriptSegment] {
         guard !segments.isEmpty else { return [] }
+        let known = (attendees + rosterNames).uniqued()
         let speakers = Set(segments.map(\.speaker))
         let onlyYou = speakers.count == 1 && speakers.contains("You")
         let hasOthers = speakers.contains("Others")
-        // Relabel when we have attendee names and either coarse "Others" labels or a mono "You" mic mix.
-        guard !attendees.isEmpty, onlyYou || hasOthers else {
+        let hasAnonymous = speakers.contains { SpeakerLabelNormalizer.isAnonymousVoiceLabel($0) }
+        // Relabel when we have known names and coarse / over-split labels.
+        guard !known.isEmpty, onlyYou || hasOthers || hasAnonymous else {
             return []
         }
 
@@ -487,11 +534,13 @@ struct MeetingIntelligence: Sendable {
             let prompt = """
             Relabel speakers for these meeting utterances.
 
-            Known attendees: \(attendees.joined(separator: ", "))
+            Known attendees / participants (use these spellings only): \(known.joined(separator: ", "))
             Rules:
             - Keep [You] when the local participant is speaking (first person about their own actions is a hint, not a rule).
-            - Replace [Others] with an attendee name when the content strongly implies who spoke.
-            - If everything is labeled [You] but clearly includes other people talking, relabel those lines to attendees when possible; otherwise leave [You].
+            - Replace [Others] with a known name when the content strongly implies who spoke; otherwise keep [Others].
+            - If you see Voice N / Speaker N / casing duplicates of the same person, MERGE them: map to one known name when clear, otherwise [Others]. Never invent new Voice/Speaker numbers.
+            - Prefer fewer speaker labels over more. Do not over-split.
+            - If everything is labeled [You] but clearly includes other people talking, relabel those lines to known names when possible; otherwise leave [You] or use [Others].
             - Do not change the spoken text — only the [Speaker] label.
             - Return the same number of lines, one per input line, as [Speaker] text.
 
@@ -499,7 +548,7 @@ struct MeetingIntelligence: Sendable {
             \(body)
             """
             guard let content = await self.prompt(
-                instructions: "You only relabel speakers. Preserve utterance text. One [Speaker] line per input line.",
+                instructions: "You only relabel speakers. Preserve utterance text. Merge over-split Voice/Speaker labels. Never invent Voice N. One [Speaker] line per input line.",
                 user: prompt
             ) else {
                 result.append(contentsOf: batch)

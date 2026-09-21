@@ -1811,6 +1811,35 @@ struct LibraryView: View {
                         .foregroundStyle(FlowTheme.muted)
                 }
             }
+
+            if model.phase == .meetingRecording {
+                HStack(spacing: 8) {
+                    liveChannelBadge(
+                        title: "You",
+                        hot: model.activeMeetingChannel == .you,
+                        level: model.audioLevel
+                    )
+                    liveChannelBadge(
+                        title: model.remoteSpeakerLabel,
+                        hot: model.activeMeetingChannel == .others,
+                        level: model.remoteAudioLevel
+                    )
+                    if liveNote?.systemAudioCaptureFailed == true {
+                        Text("System audio failed — others may show as You")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.orange)
+                    }
+                    Spacer(minLength: 0)
+                }
+
+                if !model.liveParticipantRoster.isEmpty {
+                    Text("Roster: \(model.liveParticipantRoster.prefix(8).joined(separator: ", "))")
+                        .font(.system(size: 11))
+                        .foregroundStyle(FlowTheme.muted)
+                        .lineLimit(2)
+                }
+            }
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     if let liveNote, !liveNote.segments.isEmpty {
@@ -1818,8 +1847,9 @@ struct LibraryView: View {
                             HStack(alignment: .top, spacing: 8) {
                                 Text(seg.speaker)
                                     .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(FlowTheme.muted)
-                                    .frame(width: 56, alignment: .leading)
+                                    .foregroundStyle(speakerColor(seg.speaker))
+                                    .frame(width: 72, alignment: .leading)
+                                    .lineLimit(1)
                                 Text(seg.text)
                                     .font(.system(size: 13))
                                     .foregroundStyle(FlowTheme.ink)
@@ -1846,6 +1876,32 @@ struct LibraryView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(FlowTheme.hairline, lineWidth: 1)
         )
+    }
+
+    private func liveChannelBadge(title: String, hot: Bool, level: Float) -> some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(hot ? FlowTheme.solid : FlowTheme.muted.opacity(0.35))
+                .frame(width: 7, height: 7)
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(hot ? FlowTheme.ink : FlowTheme.muted)
+            Text(String(format: "%.0f%%", Double(min(1, level)) * 100))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(FlowTheme.muted)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(hot ? FlowTheme.solid.opacity(0.12) : FlowTheme.cream.opacity(0.7))
+        )
+    }
+
+    private func speakerColor(_ speaker: String) -> Color {
+        if speaker == "You" { return FlowTheme.ink }
+        if speaker == "Others" { return FlowTheme.muted }
+        return FlowTheme.solid
     }
 
     private func looksLikeQuestion(_ text: String) -> Bool {
@@ -2564,6 +2620,9 @@ struct MeetingDetailView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var showRemindersExport = false
+    @State private var renameFrom: String = ""
+    @State private var renameTo: String = ""
+    @State private var showRenameSheet = false
 
     private var note: MeetingNote? {
         model.meetings.notes.first(where: { $0.id == noteID })
@@ -2610,8 +2669,17 @@ struct MeetingDetailView: View {
                             .font(.system(size: 28, weight: .regular, design: .serif))
                         Text(note.createdAt.formatted(date: .complete, time: .shortened))
                             .foregroundStyle(FlowTheme.muted)
+                        if let source = note.sourceAppName, !source.isEmpty {
+                            Text("Source: \(source)")
+                                .foregroundStyle(FlowTheme.muted)
+                        }
                         if !note.attendees.isEmpty {
                             Text(note.attendees.joined(separator: ", "))
+                                .foregroundStyle(FlowTheme.muted)
+                        }
+                        if !note.participantRoster.isEmpty {
+                            Text("Roster: \(note.participantRoster.joined(separator: ", "))")
+                                .font(.system(size: 12))
                                 .foregroundStyle(FlowTheme.muted)
                         }
                     }
@@ -2646,14 +2714,27 @@ struct MeetingDetailView: View {
 
                     if !note.segments.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Transcript")
-                                .font(.title3.weight(.semibold))
+                            HStack {
+                                Text("Transcript")
+                                    .font(.title3.weight(.semibold))
+                                Spacer()
+                                Button("Rename speaker…") {
+                                    renameFrom = uniqueSpeakers(in: note).first(where: { $0 != "You" })
+                                        ?? uniqueSpeakers(in: note).first
+                                        ?? "Others"
+                                    renameTo = ""
+                                    showRenameSheet = true
+                                }
+                                .font(.system(size: 12, weight: .medium))
+                            }
                             ForEach(note.segments.sorted(by: { $0.startOffset < $1.startOffset })) { seg in
                                 HStack(alignment: .top, spacing: 10) {
                                     Text(seg.speaker)
                                         .font(.system(size: 12, weight: .semibold))
                                         .foregroundStyle(FlowTheme.muted)
-                                        .frame(width: 64, alignment: .leading)
+                                        .frame(width: 88, alignment: .leading)
+                                        .lineLimit(2)
+                                        .help("Click Rename speaker to apply a name across the transcript")
                                     Text(seg.text)
                                         .textSelection(.enabled)
                                 }
@@ -2696,6 +2777,28 @@ struct MeetingDetailView: View {
         .sheet(isPresented: $showRemindersExport) {
             SendActionItemsToRemindersSheet(note: note, reminders: model.reminders)
         }
+        .sheet(isPresented: $showRenameSheet) {
+            RenameSpeakerSheet(
+                speakers: uniqueSpeakers(in: note),
+                suggestions: renameSuggestions(for: note),
+                from: $renameFrom,
+                to: $renameTo
+            ) {
+                model.renameMeetingSpeaker(noteID: note.id, from: renameFrom, to: renameTo)
+                showRenameSheet = false
+            } onCancel: {
+                showRenameSheet = false
+            }
+        }
+    }
+
+    private func uniqueSpeakers(in note: MeetingNote) -> [String] {
+        note.segments.map(\.speaker).uniqued()
+    }
+
+    private func renameSuggestions(for note: MeetingNote) -> [String] {
+        (note.attendees + note.participantRoster + [note.remoteOneOnOneName].compactMap { $0 })
+            .uniqued()
     }
 
     private func section(_ title: String, _ body: String) -> some View {
@@ -2728,6 +2831,73 @@ struct MeetingDetailView: View {
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             try? note.markdownExport.write(to: url, atomically: true, encoding: .utf8)
+        }
+    }
+}
+
+private struct RenameSpeakerSheet: View {
+    let speakers: [String]
+    let suggestions: [String]
+    @Binding var from: String
+    @Binding var to: String
+    let onApply: () -> Void
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Rename speaker")
+                .font(.system(size: 20, weight: .semibold))
+            Text("Applies to every matching line in this note. Manual renames are kept when you reprocess.")
+                .font(.system(size: 13))
+                .foregroundStyle(FlowTheme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Picker("Current label", selection: $from) {
+                ForEach(speakers, id: \.self) { name in
+                    Text(name).tag(name)
+                }
+            }
+
+            TextField("New name", text: $to)
+                .textFieldStyle(.roundedBorder)
+
+            if !suggestions.isEmpty {
+                Text("Suggestions")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(FlowTheme.muted)
+                FlowLayoutSuggestions(names: suggestions) { name in
+                    to = name
+                }
+            }
+
+            HStack {
+                Button("Cancel", action: onCancel)
+                Spacer()
+                Button("Apply to all") {
+                    onApply()
+                }
+                .disabled(to.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 420)
+    }
+}
+
+private struct FlowLayoutSuggestions: View {
+    let names: [String]
+    let onPick: (String) -> Void
+
+    var body: some View {
+        // Simple wrapping via flexible stack — keep quiet, no card chrome.
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(names.prefix(12)), id: \.self) { name in
+                Button(name) { onPick(name) }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(FlowTheme.solid)
+            }
         }
     }
 }

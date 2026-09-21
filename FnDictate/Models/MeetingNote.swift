@@ -60,6 +60,14 @@ struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
     var processingMessage: String?
     /// True when system-audio capture was requested but failed to start.
     var systemAudioCaptureFailed: Bool
+    /// Detected meeting app (Zoom / Teams / Meet / …) when recording started.
+    var sourceAppName: String?
+    /// Accessibility roster snapshot (best-effort participant display names).
+    var participantRoster: [String]
+    /// Manual speaker renames (from → to); re-applied after refine and never overwritten silently.
+    var lockedSpeakerRenames: [String: String]
+    /// Calendar 1:1 remote display name applied to the Others channel when set.
+    var remoteOneOnOneName: String?
 
     init(
         id: UUID = UUID(),
@@ -80,7 +88,11 @@ struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
         catchUp: String? = nil,
         processingState: MeetingProcessingState = .idle,
         processingMessage: String? = nil,
-        systemAudioCaptureFailed: Bool = false
+        systemAudioCaptureFailed: Bool = false,
+        sourceAppName: String? = nil,
+        participantRoster: [String] = [],
+        lockedSpeakerRenames: [String: String] = [:],
+        remoteOneOnOneName: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -101,6 +113,10 @@ struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
         self.processingState = processingState
         self.processingMessage = processingMessage
         self.systemAudioCaptureFailed = systemAudioCaptureFailed
+        self.sourceAppName = sourceAppName
+        self.participantRoster = participantRoster
+        self.lockedSpeakerRenames = lockedSpeakerRenames
+        self.remoteOneOnOneName = remoteOneOnOneName
     }
 
     enum CodingKeys: String, CodingKey {
@@ -108,6 +124,7 @@ struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
         case decisions, actionItems, openQuestions, includeSystemAudio
         case segments, attendees, calendarEventIdentifier, calendarTitle, brief, catchUp
         case processingState, processingMessage, systemAudioCaptureFailed
+        case sourceAppName, participantRoster, lockedSpeakerRenames, remoteOneOnOneName
     }
 
     init(from decoder: Decoder) throws {
@@ -131,6 +148,10 @@ struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
         processingState = try c.decodeIfPresent(MeetingProcessingState.self, forKey: .processingState) ?? .idle
         processingMessage = try c.decodeIfPresent(String.self, forKey: .processingMessage)
         systemAudioCaptureFailed = try c.decodeIfPresent(Bool.self, forKey: .systemAudioCaptureFailed) ?? false
+        sourceAppName = try c.decodeIfPresent(String.self, forKey: .sourceAppName)
+        participantRoster = try c.decodeIfPresent([String].self, forKey: .participantRoster) ?? []
+        lockedSpeakerRenames = try c.decodeIfPresent([String: String].self, forKey: .lockedSpeakerRenames) ?? [:]
+        remoteOneOnOneName = try c.decodeIfPresent(String.self, forKey: .remoteOneOnOneName)
     }
 
     /// Recording length when `endedAt` is known; otherwise nil (still in progress / incomplete).
@@ -198,8 +219,18 @@ struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
             lines.append("")
         }
 
+        if let sourceAppName, !sourceAppName.isEmpty {
+            lines.append("**Source:** \(sourceAppName)")
+            lines.append("")
+        }
+
         if !attendees.isEmpty {
             lines.append("**Attendees:** \(attendees.joined(separator: ", "))")
+            lines.append("")
+        }
+
+        if !participantRoster.isEmpty {
+            lines.append("**Participants (UI):** \(participantRoster.joined(separator: ", "))")
             lines.append("")
         }
 
