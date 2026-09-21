@@ -261,7 +261,7 @@ final class AppModel {
 
     /// Runs the same cleanup used at paste time (for Edit Formatted preview).
     func cleanedText(_ text: String, tone: CleanupTone) async -> String {
-        await cleaner.clean(text, tone: tone)
+        await cleaner.clean(text, tone: tone, preserveTerms: dictionary.preferredSpellings)
     }
 
     /// Curated defaults + history apps + orphan overrides for Library → Formatting.
@@ -353,7 +353,9 @@ final class AppModel {
         defer { UserDefaults.standard.set(true, forKey: didMineHistoryKey) }
 
         for entry in history.entries.prefix(50) {
-            guard let original = entry.originalText,
+            // Only user revisions — cleanup/dictionary output is not a correction.
+            guard entry.isRevised,
+                  let original = entry.originalText,
                   original.caseInsensitiveCompare(entry.text) != .orderedSame
             else { continue }
             dictionary.learn(from: original, to: entry.text)
@@ -627,7 +629,11 @@ final class AppModel {
         let tone = effectiveTone(bundleID: bundleID, name: name)
         currentTone = tone
         statusMessage = "Cleaning up…"
-        let cleaned = await cleaner.clean(commanded, tone: tone)
+        let cleaned = await cleaner.clean(
+            commanded,
+            tone: tone,
+            preserveTerms: dictionary.preferredSpellings
+        )
         let finalized = dictionary.apply(to: cleaned)
 
         if !finalized.isEmpty {
@@ -640,13 +646,6 @@ final class AppModel {
             )
             history.add(entry)
             statusMessage = "Pasted"
-
-            let learnFrom = raw
-            let learnTo = finalized
-            Task { @MainActor [weak self] in
-                guard let self, learnFrom.caseInsensitiveCompare(learnTo) != .orderedSame else { return }
-                self.dictionary.learn(from: learnFrom, to: learnTo)
-            }
 
             startInAppCorrectionWatch(pasted: finalized, targetApp: target, historyEntryID: entry.id)
         } else {
@@ -1126,10 +1125,12 @@ final class AppModel {
     }
 
     private func meetingHints(attendees: [String]) -> [String] {
-        let spellings = Array(dictionary.preferredSpellings.prefix(40))
-        let incorrects = dictionary.entries.map(\.incorrect)
-        let recent = history.recentVocabulary(limit: 30)
-        return Array((attendees + spellings + incorrects + recent).uniqued().prefix(100))
+        ASRHintBuilder.makeHints(
+            preferredSpellings: dictionary.preferredSpellings,
+            recentVocabulary: history.recentVocabulary(limit: 40),
+            attendees: attendees,
+            limit: ASRHintBuilder.meetingLimit
+        )
     }
 
     private func selectedMeetingFocus(_ id: UUID) {
@@ -1200,11 +1201,11 @@ final class AppModel {
     }
 
     private func dictionaryHints() -> [String] {
-        let spellings = Array(dictionary.preferredSpellings.prefix(40))
-        let incorrects = dictionary.entries.map(\.incorrect)
-        let recent = history.recentVocabulary(limit: 40)
-        // Prefer correct spellings as ASR context; include incorrects + recent vocab.
-        return Array((spellings + incorrects + recent).uniqued().prefix(80))
+        ASRHintBuilder.makeHints(
+            preferredSpellings: dictionary.preferredSpellings,
+            recentVocabulary: history.recentVocabulary(limit: 40),
+            limit: ASRHintBuilder.dictationLimit
+        )
     }
 
     func toggleListeningPillCollapsed() {

@@ -60,6 +60,9 @@ actor SpeechTranscriptionService {
         )
         inputContinuation = continuation
 
+        // Preferred spellings / names only. SpeechTranscriber may ignore these
+        // (DictationTranscriber is the documented custom-vocab path); set them
+        // anyway so a future dictation-module swap keeps the same hint list.
         let context = AnalysisContext()
         let hints = Array(contextualStrings.prefix(100))
         if !hints.isEmpty {

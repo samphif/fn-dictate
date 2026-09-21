@@ -75,7 +75,7 @@ enum FormattingDefaults {
 }
 
 struct TextCleaner: Sendable {
-    func clean(_ text: String, tone: CleanupTone) async -> String {
+    func clean(_ text: String, tone: CleanupTone, preserveTerms: [String] = []) async -> String {
         let basic = Self.basicCleanup(text)
         guard tone != .raw else { return basic }
         // Wispr Flow skips Auto Cleanup on very short or very long text.
@@ -83,7 +83,7 @@ struct TextCleaner: Sendable {
 
         #if canImport(FoundationModels)
         if #available(macOS 26, *) {
-            if let smart = await smartCleanup(basic, tone: tone),
+            if let smart = await smartCleanup(basic, tone: tone, preserveTerms: preserveTerms),
                CleanupFidelity.accept(smart, original: basic, tone: tone)
             {
                 return smart
@@ -92,6 +92,28 @@ struct TextCleaner: Sendable {
         #endif
 
         return basic
+    }
+
+    /// Instructs cleanup to keep user spellings when they match what was said.
+    /// Never tells the model to insert unused dictionary terms.
+    static func preservationClause(_ terms: [String]) -> String {
+        var seen = Set<String>()
+        var kept: [String] = []
+        for raw in terms {
+            let term = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !term.isEmpty else { continue }
+            let key = term.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            kept.append(term)
+            if kept.count >= 40 { break }
+        }
+        guard !kept.isEmpty else { return "" }
+        return """
+
+        Preferred spellings — use these forms only when the speaker said that \
+        term or a clear mishear of it. Never insert a term that was not said:
+        \(kept.joined(separator: ", "))
+        """
     }
 
     func summarizeMeeting(transcript: String) async -> MeetingNote {
@@ -167,10 +189,15 @@ struct TextCleaner: Sendable {
 
     #if canImport(FoundationModels)
     @available(macOS 26, *)
-    private func smartCleanup(_ text: String, tone: CleanupTone) async -> String? {
+    private func smartCleanup(
+        _ text: String,
+        tone: CleanupTone,
+        preserveTerms: [String]
+    ) async -> String? {
         let model = SystemLanguageModel.default
         guard case .available = model.availability else { return nil }
 
+        let vocab = Self.preservationClause(preserveTerms)
         let instructions: String
         switch tone {
         case .raw:
@@ -187,6 +214,7 @@ struct TextCleaner: Sendable {
             - Do not add information, examples, headings, lists, or structure.
             - Do not expand. Output must be the same length as the input, or shorter.
             - Return only the cleaned text.
+            \(vocab)
             """
         case .polished:
             instructions = """
@@ -205,6 +233,7 @@ struct TextCleaner: Sendable {
             Never invent a list the speaker did not say.
             - Plain text only: no markdown bold/italic, no headings, no HTML.
             - Return only the cleaned text.
+            \(vocab)
             """
         }
 

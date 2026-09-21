@@ -1328,7 +1328,7 @@ struct LibraryView: View {
                     Text(model.dictionary.entries.isEmpty ? "Dictionary is empty" : "No matches")
                         .font(.headline)
                     Text(model.dictionary.entries.isEmpty
-                         ? "Add names and jargon, or fix a misspelling after paste with Learn from in-app corrections on."
+                         ? "Add a preferred spelling (names, jargon) even before it is misheard, or fix a misspelling after paste with Learn from in-app corrections on."
                          : "Try a different filter or search.")
                         .font(.subheadline)
                         .foregroundStyle(FlowTheme.muted)
@@ -1370,24 +1370,38 @@ struct LibraryView: View {
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
                 HStack(spacing: 8) {
-                    Text(entry.incorrect)
-                        .font(.system(size: 15, weight: .regular))
-                        .foregroundStyle(FlowTheme.muted)
-                        .lineLimit(1)
-                    Image(systemName: "arrow.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(FlowTheme.muted.opacity(0.7))
-                    Text(entry.correct)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(FlowTheme.ink)
-                        .lineLimit(1)
+                    if entry.isHintOnly {
+                        Text(entry.correct)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(FlowTheme.ink)
+                            .lineLimit(1)
+                        Text("preferred")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(FlowTheme.muted)
+                    } else {
+                        Text(entry.incorrect)
+                            .font(.system(size: 15, weight: .regular))
+                            .foregroundStyle(FlowTheme.muted)
+                            .lineLimit(1)
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(FlowTheme.muted.opacity(0.7))
+                        Text(entry.correct)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(FlowTheme.ink)
+                            .lineLimit(1)
+                    }
                     if entry.isStarred {
                         Text("✨")
                             .font(.system(size: 11))
                     }
                 }
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("\(entry.incorrect) goes to \(entry.correct)")
+                .accessibilityLabel(
+                    entry.isHintOnly
+                        ? "Preferred spelling \(entry.correct)"
+                        : "\(entry.incorrect) goes to \(entry.correct)"
+                )
                 Spacer(minLength: 12)
                 // Always reserve trailing space so hover/selection doesn't reflow text.
                 HStack(spacing: 10) {
@@ -1414,7 +1428,7 @@ struct LibraryView: View {
             if selected {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        TextField("Heard / incorrect", text: $editIncorrect)
+                        TextField("Heard / incorrect (optional)", text: $editIncorrect)
                             .textFieldStyle(.roundedBorder)
                         TextField("Correct spelling", text: $editCorrect)
                             .textFieldStyle(.roundedBorder)
@@ -1464,11 +1478,11 @@ struct LibraryView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Add new word")
                 .font(.title2.weight(.semibold))
-            Text("Map what speech recognition hears to the spelling you want.")
+            Text("Add a preferred spelling, or map what speech recognition hears to the spelling you want.")
                 .foregroundStyle(FlowTheme.muted)
 
             Form {
-                TextField("Heard / incorrect", text: $newIncorrect)
+                TextField("Heard / incorrect (optional)", text: $newIncorrect)
                 TextField("Correct spelling", text: $newCorrect)
             }
             .formStyle(.grouped)
@@ -1484,10 +1498,7 @@ struct LibraryView: View {
                     flash("Added to dictionary")
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(
-                    newIncorrect.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || newCorrect.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
+                .disabled(newCorrect.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(24)
@@ -1497,8 +1508,10 @@ struct LibraryView: View {
     private func canSaveDictionaryEdit(_ entry: DictionaryEntry) -> Bool {
         let incorrect = editIncorrect.trimmingCharacters(in: .whitespacesAndNewlines)
         let correct = editCorrect.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !incorrect.isEmpty, !correct.isEmpty else { return false }
-        guard incorrect.caseInsensitiveCompare(correct) != .orderedSame else { return false }
+        guard !correct.isEmpty else { return false }
+        if !incorrect.isEmpty, incorrect.caseInsensitiveCompare(correct) == .orderedSame {
+            return false
+        }
         return incorrect != entry.incorrect || correct != entry.correct
     }
 
@@ -1507,7 +1520,7 @@ struct LibraryView: View {
         let correct = editCorrect.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canSaveDictionaryEdit(entry) else { return }
         var updated = entry
-        updated.incorrect = incorrect
+        updated.incorrect = incorrect.caseInsensitiveCompare(correct) == .orderedSame ? "" : incorrect
         updated.correct = correct
         model.dictionary.update(updated)
         flash("Saved")
