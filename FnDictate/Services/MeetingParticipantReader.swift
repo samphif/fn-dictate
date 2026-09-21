@@ -107,7 +107,8 @@ enum MeetingParticipantReader {
             collected.append(cleaned)
         }
 
-        walk(appElement, depth: 0, maxDepth: 10, budget: 400, visit: &collected) { element in
+        var budget = 400
+        walk(appElement, depth: 0, maxDepth: 10, budget: &budget) { element in
             if let title = stringAttribute(element, kAXTitleAttribute as String) {
                 consider(title)
             }
