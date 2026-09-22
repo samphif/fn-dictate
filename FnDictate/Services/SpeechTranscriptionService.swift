@@ -8,7 +8,7 @@ struct SendablePCMBuffer: @unchecked Sendable {
 }
 
 @available(macOS 26, *)
-actor SpeechTranscriptionService {
+actor SpeechTranscriptionService: TranscriptionEngine {
     private var analyzer: SpeechAnalyzer?
     private var transcriber: SpeechTranscriber?
     private var inputContinuation: AsyncStream<AnalyzerInput>.Continuation?
@@ -122,7 +122,8 @@ actor SpeechTranscriptionService {
         continuation.yield(AnalyzerInput(buffer: buffer))
     }
 
-    func finish() async -> String {
+    func finish(timeout: Duration = .seconds(3)) async -> String {
+        _ = timeout
         inputContinuation?.finish()
         inputContinuation = nil
 

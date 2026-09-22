@@ -79,11 +79,20 @@ Apple’s built-in dictation is slow to start and will fight Fn Dictate for the 
 | External keyboard has no Fn     | Use **Ctrl+Opt** hold instead                                                   |
 | Meeting missing remote audio    | Enable Screen Recording + “Include system audio”                                |
 | Cleanup sounds unpolished       | Enable Apple Intelligence (Foundation Models); basic cleanup still runs offline |
+| First dictate hangs / “Downloading Parakeet…” | Wait for the one-time Hugging Face model fetch (needs network); or set Speech engine → Apple |
+| Parakeet paste falls back to weaker words | Confirm Speech engine is **Parakeet** in menu bar / Library → Formatting; wait for model ready |
 
 
+## 5. Speech engine (Parakeet)
+
+Fn Dictate defaults to **Parakeet TDT 0.6B v2** (FluidAudio) for the final transcript after you release Fn. Live partials still use Apple Speech.
+
+- Menu bar → **Speech engine**, or Library → **Formatting** → Speech recognition
+- First Parakeet use downloads Core ML models (~once); later runs are offline
+- If download fails or you want maximum speed, switch to **Apple**
 
 
-## 5. Data location
+## 6. Data location
 
 `~/Library/Application Support/FnDictate/`
 

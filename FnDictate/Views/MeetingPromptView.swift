@@ -308,14 +308,17 @@ struct MeetingPromptView: View {
 
 /// Hosting controller that keeps its layer fully clear so rounded SwiftUI chrome
 /// isn't boxed by the default opaque (often black) AppKit view background.
+///
+/// Avoid `viewDidLayout` — on recent macOS/Swift runtimes the MainActor executor
+/// check at the top of that override can crash during AppKit display-cycle layout.
 final class ClearHostingController<Content: View>: NSHostingController<Content> {
     override func viewDidLoad() {
         super.viewDidLoad()
         clearBackground()
     }
 
-    override func viewDidLayout() {
-        super.viewDidLayout()
+    override func viewWillAppear() {
+        super.viewWillAppear()
         clearBackground()
     }
 

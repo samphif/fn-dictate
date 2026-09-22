@@ -967,6 +967,31 @@ struct LibraryView: View {
                     .foregroundStyle(FlowTheme.muted)
                     .fixedSize(horizontal: false, vertical: true)
 
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Speech recognition")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(FlowTheme.ink)
+                    Text(model.asrEngineMode.help)
+                        .font(.system(size: 12))
+                        .foregroundStyle(FlowTheme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Picker("Speech engine", selection: $model.asrEngineMode) {
+                        ForEach(ASREngineMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    if model.asrEngineMode == .parakeet, !model.parakeetReady {
+                        Text("Downloading Parakeet model…")
+                            .font(.system(size: 12))
+                            .foregroundStyle(FlowTheme.muted)
+                    }
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(FlowTheme.cream, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+
                 VStack(spacing: 0) {
                     ForEach(Array(model.formattingProfiles.enumerated()), id: \.element.id) { index, profile in
                         formattingProfileRow(profile)
@@ -2497,6 +2522,7 @@ private struct DictationRowView: View {
 private enum MeetingRailSection: String, Identifiable {
     case actionItems
     case keyPoints
+    case openQuestions
 
     var id: String { rawValue }
 
@@ -2504,6 +2530,7 @@ private enum MeetingRailSection: String, Identifiable {
         switch self {
         case .actionItems: "Action items"
         case .keyPoints: "Key points"
+        case .openQuestions: "Open questions"
         }
     }
 
@@ -2511,6 +2538,7 @@ private enum MeetingRailSection: String, Identifiable {
         switch self {
         case .actionItems: "checklist"
         case .keyPoints: "lightbulb"
+        case .openQuestions: "questionmark.circle"
         }
     }
 }
@@ -2642,8 +2670,10 @@ private struct MeetingPreviewCard: View {
                             title: "Open questions",
                             icon: "questionmark.circle",
                             items: note.openQuestions,
-                            limit: 3
-                        )
+                            limit: 5
+                        ) {
+                            focusedSection = .openQuestions
+                        }
                     }
 
                     if let brief = note.brief, !brief.isEmpty {
@@ -2911,7 +2941,13 @@ private struct MeetingSectionSheet: View {
 
     @ViewBuilder
     private func sheetBody(_ note: MeetingNote) -> some View {
-        let items = section == .actionItems ? note.actionItems : note.decisions
+        let items: [String] = {
+            switch section {
+            case .actionItems: note.actionItems
+            case .keyPoints: note.decisions
+            case .openQuestions: note.openQuestions
+            }
+        }()
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: 10) {
                 Image(systemName: section.icon)
@@ -2957,6 +2993,8 @@ private struct MeetingSectionSheet: View {
                         actionItemsList(note)
                     case .keyPoints:
                         keyPointsList(note.decisions)
+                    case .openQuestions:
+                        keyPointsList(note.openQuestions)
                     }
                 }
                 .padding(.horizontal, 22)

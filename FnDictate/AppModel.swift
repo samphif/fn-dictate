@@ -52,6 +52,15 @@ final class AppModel {
             UserDefaults.standard.set(autoStopRecordingWhenMeetingEnds, forKey: autoStopMeetingKey)
         }
     }
+    /// Final ASR engine. Live partials stay on Apple; Parakeet refines buffered audio on release.
+    var asrEngineMode: ASREngineMode = .parakeet {
+        didSet {
+            UserDefaults.standard.set(asrEngineMode.rawValue, forKey: asrEngineModeKey)
+            Task { await applyASREngineMode() }
+        }
+    }
+    /// True after Parakeet models finished loading (or when using Apple-only).
+    var parakeetReady = false
     var activeMeetingID: UUID?
     var detectedMeeting: DetectedMeeting?
     var showMeetingPrompt = false
@@ -84,6 +93,7 @@ final class AppModel {
     private let setupCompletedKey = "FnDictate.setupCompleted"
     private let learnFromInAppKey = "FnDictate.learnFromInAppCorrections"
     private let autoStopMeetingKey = "FnDictate.autoStopRecordingWhenMeetingEnds"
+    private let asrEngineModeKey = "FnDictate.asrEngineMode"
 
     let permissions = PermissionManager()
     let history = HistoryStore()
@@ -111,9 +121,10 @@ final class AppModel {
     private let meetingIntelligence = MeetingIntelligence()
     private let correctionWatcher = InAppCorrectionWatcher()
     private let speakerTracker = MeetingSpeakerTracker()
-    private var speech: SpeechTranscriptionService?
+    private let parakeetASR = ParakeetASRClient()
+    private var speech: HybridTranscriptionService?
     /// Second analyzer for system-audio channel during meetings (Others).
-    private var speechRemote: SpeechTranscriptionService?
+    private var speechRemote: HybridTranscriptionService?
     private var systemAudio: SystemAudioCapture?
     private var listeningPill: NSPanel?
     private var meetingPromptPanel: NSPanel?
@@ -204,6 +215,13 @@ final class AppModel {
         } else {
             autoStopRecordingWhenMeetingEnds = UserDefaults.standard.bool(forKey: autoStopMeetingKey)
         }
+        if let raw = UserDefaults.standard.string(forKey: asrEngineModeKey),
+           let mode = ASREngineMode(rawValue: raw)
+        {
+            asrEngineMode = mode
+        } else {
+            asrEngineMode = .parakeet
+        }
         permissions.refresh()
         calendar.refreshStatus()
         refreshUpcomingCalendar()
@@ -217,8 +235,9 @@ final class AppModel {
         }
 
         if #available(macOS 26, *) {
-            speech = SpeechTranscriptionService()
-            speechRemote = SpeechTranscriptionService()
+            speech = HybridTranscriptionService(parakeet: parakeetASR)
+            speechRemote = HybridTranscriptionService(parakeet: parakeetASR)
+            Task { await applyASREngineMode() }
         }
 
         mineHistoryIntoDictionaryIfNeeded()
@@ -230,6 +249,11 @@ final class AppModel {
             }
             if let speechRemote {
                 try? await speechRemote.prewarm()
+            }
+            if asrEngineMode == .apple {
+                parakeetReady = true
+            } else {
+                parakeetReady = await parakeetASR.isReady
             }
             await refreshUpcomingBriefIfNeeded()
         }
@@ -708,7 +732,7 @@ final class AppModel {
         showListeningPill(false)
         partialText = ""
 
-        let raw = await speech.finish()
+        let raw = await speech.finish(timeout: .seconds(3))
         let commanded = VoiceCommandProcessor.process(raw)
         let target = TextPaster.resolvedPasteTarget(preferred: dictationTargetApp)
         let bundleID = target?.bundleIdentifier
@@ -1046,12 +1070,12 @@ final class AppModel {
         var youText = ""
         var othersText = ""
         if let speech {
-            youText = await speech.finish()
+            youText = await speech.finish(timeout: .seconds(45))
             await speech.setFinalSegmentHandler(nil)
             await speech.setPartialHandler(nil)
         }
         if includeSystemAudioInMeetings, let remote = speechRemote, remote !== speech {
-            othersText = await remote.finish()
+            othersText = await remote.finish(timeout: .seconds(45))
             await remote.setFinalSegmentHandler(nil)
             await remote.setPartialHandler(nil)
         }
@@ -1078,9 +1102,20 @@ final class AppModel {
             note.participantRoster = liveParticipantRoster
         }
 
-        let rawLabeled = note.labeledTranscript.isEmpty
-            ? [youText, othersText].filter { !$0.isEmpty }.joined(separator: "\n")
-            : note.labeledTranscript
+        let remoteLabel = note.remoteOneOnOneName ?? "Others"
+        let rawLabeled: String
+        if asrEngineMode == .parakeet, !youText.isEmpty || !othersText.isEmpty {
+            // Prefer Parakeet channel transcripts for word accuracy; keep live Apple
+            // segments for speaker-turn UI / voiceprints.
+            var parts: [String] = []
+            if !youText.isEmpty { parts.append("[You] \(youText)") }
+            if !othersText.isEmpty { parts.append("[\(remoteLabel)] \(othersText)") }
+            rawLabeled = parts.joined(separator: "\n")
+        } else if note.labeledTranscript.isEmpty {
+            rawLabeled = [youText, othersText].filter { !$0.isEmpty }.joined(separator: "\n")
+        } else {
+            rawLabeled = note.labeledTranscript
+        }
         let withDictionary = dictionary.apply(to: rawLabeled)
 
         note.endedAt = .now
@@ -1509,7 +1544,14 @@ final class AppModel {
         let incorrects = dictionary.entries.map(\.incorrect)
         let recent = history.recentVocabulary(limit: 30)
         let voices = speakerTracker.voices.rememberedNames
-        return Array((attendees + voices + spellings + incorrects + recent).uniqued().prefix(100))
+        let projectNames = projects.projects.map(\.name)
+        let people = projects.projects.flatMap(\.people)
+        let roster = liveParticipantRoster
+        return Array(
+            (attendees + voices + projectNames + people + roster + spellings + incorrects + recent)
+                .uniqued()
+                .prefix(100)
+        )
     }
 
     private func selectedMeetingFocus(_ id: UUID) {
@@ -1588,8 +1630,30 @@ final class AppModel {
         let spellings = Array(dictionary.preferredSpellings.prefix(40))
         let incorrects = dictionary.entries.map(\.incorrect)
         let recent = history.recentVocabulary(limit: 40)
-        // Prefer correct spellings as ASR context; include incorrects + recent vocab.
-        return Array((spellings + incorrects + recent).uniqued().prefix(80))
+        let projectNames = projects.projects.map(\.name)
+        let people = projects.projects.flatMap(\.people)
+        let roster = liveParticipantRoster
+        let attendees = upcomingCalendarMeeting?.attendees ?? []
+        // Prefer correct spellings as ASR context; include projects, people, roster.
+        return Array(
+            (spellings + projectNames + people + roster + attendees + incorrects + recent)
+                .uniqued()
+                .prefix(100)
+        )
+    }
+
+    private func applyASREngineMode() async {
+        await speech?.setMode(asrEngineMode)
+        await speechRemote?.setMode(asrEngineMode)
+        if asrEngineMode == .apple {
+            parakeetReady = true
+        } else {
+            parakeetReady = await parakeetASR.isReady
+            if !parakeetReady {
+                await parakeetASR.prewarm()
+                parakeetReady = await parakeetASR.isReady
+            }
+        }
     }
 
     func toggleListeningPillCollapsed() {
