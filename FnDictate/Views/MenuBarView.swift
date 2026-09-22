@@ -67,6 +67,26 @@ struct MenuBarView: View {
                 .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .help("After paste, learn spelling fixes you make in the app (uses Accessibility).")
 
+                Picker(selection: $model.asrEngineMode) {
+                    ForEach(ASREngineMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                } label: {
+                    Label {
+                        Text("Speech engine")
+                            .font(.body)
+                    } icon: {
+                        Image(systemName: "waveform")
+                            .frame(width: 18, alignment: .center)
+                    }
+                }
+                .pickerStyle(.menu)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .help(model.asrEngineMode.help)
+
                 menuButton(title: "Library", systemImage: "books.vertical") {
                     appDelegate.presentLibrary()
                 }

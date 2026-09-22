@@ -58,6 +58,12 @@ enum FocusedTextReader {
         CFEqual(a, b)
     }
 
+    /// Focused editable field, if Accessibility can see one.
+    static func editableFocus() -> (element: AXUIElement, pid: pid_t)? {
+        guard let reading = readFocused(), isEditableRole(reading.snapshot.role) else { return nil }
+        return (reading.element, reading.snapshot.pid)
+    }
+
     // MARK: - Tree search
 
     private static func readBest(

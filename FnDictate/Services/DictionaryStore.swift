@@ -8,6 +8,15 @@ final class DictionaryStore {
 
     private let url: URL
 
+    /// Common function/filler words that must never become dictionary replacements.
+    /// Auto-learning from polish diffs was inventing poison like `to` → `You`.
+    private static let unsafeLearnWords: Set<String> = [
+        "a", "an", "and", "as", "at", "be", "but", "by", "do", "for", "from",
+        "have", "i", "if", "in", "is", "it", "me", "my", "no", "not", "of",
+        "on", "or", "so", "that", "the", "to", "uh", "um", "up", "we", "with",
+        "you", "your",
+    ]
+
     init() {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("FnDictate", isDirectory: true)
@@ -30,6 +39,7 @@ final class DictionaryStore {
             addHintOnly(good, starred: starred)
             return
         }
+        guard Self.isSafeCorrection(incorrect: bad, correct: good) else { return }
 
         if let index = entries.firstIndex(where: {
             !$0.incorrect.isEmpty && $0.incorrect.caseInsensitiveCompare(bad) == .orderedSame
@@ -66,6 +76,7 @@ final class DictionaryStore {
 
     func update(_ entry: DictionaryEntry) {
         guard let index = entries.firstIndex(where: { $0.id == entry.id }) else { return }
+        guard Self.isSafeCorrection(incorrect: entry.incorrect, correct: entry.correct) else { return }
         entries[index] = entry
         sortEntries()
         save()
@@ -98,9 +109,27 @@ final class DictionaryStore {
             // Ignore huge rewrites — those aren't dictionary corrections.
             guard bad.count <= 80, good.count <= 80 else { continue }
             guard before.count <= 3 || bad.split(separator: " ").count <= 4 else { continue }
+            guard Self.isSafeCorrection(incorrect: bad, correct: good) else { continue }
             results.append((bad, good))
         }
         return results
+    }
+
+    /// Rejects corrections that would rewrite everyday function words (e.g. `to` → `You`).
+    static func isSafeCorrection(incorrect: String, correct: String) -> Bool {
+        let badTokens = tokens(incorrect)
+        let goodTokens = tokens(correct)
+        guard !badTokens.isEmpty, !goodTokens.isEmpty else { return false }
+
+        // Never learn a replacement whose source is only common words.
+        if badTokens.allSatisfy({ unsafeLearnWords.contains($0.lowercased()) }) {
+            return false
+        }
+        // Single-token common → anything is almost always an LCS false pair from polish.
+        if badTokens.count == 1, unsafeLearnWords.contains(badTokens[0].lowercased()) {
+            return false
+        }
+        return true
     }
 
     /// Word-level edits for UI (substitutions, deletions, and insertions).
@@ -141,6 +170,9 @@ final class DictionaryStore {
 
         for entry in sorted {
             guard !entry.incorrect.isEmpty else { continue }
+            guard Self.isSafeCorrection(incorrect: entry.incorrect, correct: entry.correct) else {
+                continue
+            }
             let pattern = "\\b\(NSRegularExpression.escapedPattern(for: entry.incorrect))\\b"
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
                 continue
@@ -258,7 +290,19 @@ final class DictionaryStore {
     private func load() {
         guard let data = try? Data(contentsOf: url) else { return }
         entries = (try? JSONDecoder().decode([DictionaryEntry].self, from: data)) ?? []
+        purgeUnsafeEntries()
         sortEntries()
+    }
+
+    /// Drop poisoned auto-learns like `to` → `You` that slipped in from polish diffs.
+    private func purgeUnsafeEntries() {
+        let before = entries.count
+        entries.removeAll {
+            !Self.isSafeCorrection(incorrect: $0.incorrect, correct: $0.correct)
+        }
+        if entries.count != before {
+            save()
+        }
     }
 
     private func save() {

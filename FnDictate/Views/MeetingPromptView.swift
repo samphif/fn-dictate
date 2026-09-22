@@ -1,82 +1,219 @@
 import AppKit
 import SwiftUI
 
-/// Wispr-style floating rail: collapsed edge handle by default, expands for meeting actions.
+/// Wispr-style floating rail: tiny edge handle by default, expands into a Dictate cluster.
 struct MeetingPromptView: View {
     @Bindable var model: AppModel
+    @State private var hoverCollapseTask: Task<Void, Never>?
+    @State private var hoverExpandTask: Task<Void, Never>?
 
     private var isExpanded: Bool {
         (model.showMeetingPrompt && !model.meetingPromptMinimized) || model.flowSidebarExpanded
     }
 
+    private var showMeetingSheet: Bool {
+        model.showMeetingPrompt && !model.meetingPromptMinimized
+    }
+
+    private var detectedSourceLabel: String {
+        AppDisplayName.meetingSource(
+            appName: model.detectedMeeting?.appName,
+            bundleID: model.detectedMeeting?.bundleID,
+            detail: model.detectedMeeting?.detail
+        ) ?? model.detectedMeeting?.appName ?? "Call"
+    }
+
+    private var railAnimation: Animation {
+        .easeInOut(duration: 0.28)
+    }
+
     var body: some View {
         Group {
-            if isExpanded {
-                expandedBody
+            if showMeetingSheet {
+                meetingExpandedBody
             } else {
-                collapsedBody
+                idleRailBody
             }
         }
-        // Leave room so SwiftUI shadows aren't clipped by the panel bounds.
-        .padding(14)
-        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: isExpanded)
+        // Keep chrome glued to the screen edge if the panel is slightly oversized.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        .animation(railAnimation, value: isExpanded)
+        .animation(railAnimation, value: showMeetingSheet)
         .draggablePanel(
             onDragStart: { model.flowSidebarOrigin() },
             onDragTo: { model.moveFlowSidebar(to: $0) }
         )
         .preferredColorScheme(.dark)
+        .onDisappear {
+            hoverCollapseTask?.cancel()
+            hoverExpandTask?.cancel()
+            hoverCollapseTask = nil
+            hoverExpandTask = nil
+        }
     }
 
-    private var collapsedBody: some View {
-        ZStack {
-            WindowDragHandle(onClick: { model.toggleFlowSidebar() })
+    // MARK: - Hover
 
-            VStack(spacing: 10) {
-                Capsule(style: .continuous)
-                    .fill(Color.white.opacity(0.4))
-                    .frame(width: 16, height: 3)
+    private func handleHover(_ hovering: Bool) {
+        hoverCollapseTask?.cancel()
+        hoverExpandTask?.cancel()
+        hoverCollapseTask = nil
+        hoverExpandTask = nil
 
-                Image(systemName: model.showMeetingPrompt ? "video.fill" : "waveform.circle.fill")
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(model.showMeetingPrompt ? Color.accentColor : .white.opacity(0.92))
-                    .symbolRenderingMode(.hierarchical)
+        if hovering {
+            // Brief dwell so the cursor crossing the edge doesn't flicker open.
+            hoverExpandTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 70_000_000)
+                guard !Task.isCancelled else { return }
+                expandFromHover()
+            }
+        } else {
+            hoverCollapseTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 420_000_000)
+                guard !Task.isCancelled else { return }
+                model.collapseFlowSidebar()
+            }
+        }
+    }
 
-                if model.showMeetingPrompt {
-                    Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 6, height: 6)
+    private func expandFromHover() {
+        if model.showMeetingPrompt, model.meetingPromptMinimized {
+            model.toggleFlowSidebar()
+        } else if !model.showMeetingPrompt, !model.flowSidebarExpanded {
+            model.toggleFlowSidebar()
+        }
+    }
+
+    // MARK: - Idle rail (morphing collapse ↔ expand)
+
+    /// One continuous layout: cluster width/opacity morphs; handle stays docked.
+    private var idleRailBody: some View {
+        HStack(alignment: .center, spacing: isExpanded ? 8 : 0) {
+            flowClusterControls
+                .opacity(isExpanded ? 1 : 0)
+                .scaleEffect(isExpanded ? 1 : 0.92, anchor: .trailing)
+                .frame(width: isExpanded ? nil : 0, alignment: .trailing)
+                .clipped()
+                .allowsHitTesting(isExpanded)
+
+            edgeHandle(
+                onClick: {
+                    if isExpanded {
+                        model.collapseFlowSidebar()
+                    } else {
+                        model.toggleFlowSidebar()
+                    }
+                },
+                help: isExpanded
+                    ? "Drag to move · click to collapse"
+                    : "Fn Dictate — hover or click to expand"
+            )
+        }
+        // Shadow room inward only; trailing stays flush. No group shadow (avoids square halo).
+        .padding(.leading, isExpanded ? 12 : 6)
+        .padding(.vertical, isExpanded ? 12 : 6)
+        .padding(.trailing, 1)
+        // Capture hits across spacing without an opaque rectangular fill that shadows.
+        .contentShape(Rectangle())
+        .background(Color.black.opacity(0.001))
+        .onHover(perform: handleHover)
+    }
+
+    private var flowClusterControls: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Button {
+                model.startHandsFreeDictationFromUI()
+            } label: {
+                HStack(spacing: 0) {
+                    Text("Dictate ")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                    Text("fn")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
                 }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color.black.opacity(0.92))
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.14), lineWidth: 0.5)
+                )
             }
-            .allowsHitTesting(false)
-        }
-        .frame(width: 44, height: 112)
-        .background {
-            ZStack {
-                Capsule(style: .continuous)
-                    .fill(.regularMaterial)
-                Capsule(style: .continuous)
-                    .fill(Color.black.opacity(0.28))
+            .buttonStyle(.plain)
+            .help("Start hands-free dictation (same as double-tap Fn)")
+
+            VStack(spacing: 8) {
+                Button {
+                    model.startHandsFreeDictationFromUI()
+                } label: {
+                    Image(systemName: "mic.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.95))
+                        .frame(width: 36, height: 52)
+                        .background {
+                            Capsule(style: .continuous)
+                                .fill(Color.black.opacity(0.55))
+                        }
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.22), lineWidth: 0.8)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Start hands-free dictation")
+
+                Button {
+                    model.toggleMeeting()
+                    model.collapseFlowSidebar()
+                } label: {
+                    Image(systemName: "record.circle")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color.black.opacity(0.55)))
+                        .overlay(
+                            Circle()
+                                .strokeBorder(Color.white.opacity(0.22), lineWidth: 0.8)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Start meeting notes")
             }
         }
-        .clipShape(Capsule(style: .continuous))
+    }
+
+    private func edgeHandle(onClick: @escaping () -> Void, help: String) -> some View {
+        ZStack {
+            WindowDragHandle(
+                onClick: onClick,
+                onHover: handleHover
+            )
+            Color.clear.allowsHitTesting(false)
+        }
+        .frame(width: 8, height: 36)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.black.opacity(0.88))
+        )
         .overlay(
             Capsule(style: .continuous)
-                .strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
+                .strokeBorder(Color.white.opacity(0.28), lineWidth: 0.8)
         )
-        .compositingGroup()
-        .shadow(color: .black.opacity(0.28), radius: 10, y: 4)
-        .help(model.showMeetingPrompt
-              ? "Meeting detected — drag to move, click to expand"
-              : "Fn Dictate — drag to move, click to expand")
+        .help(help)
     }
 
-    private var expandedBody: some View {
+    // MARK: - Meeting sheet
+
+    private var meetingExpandedBody: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 ZStack {
                     WindowDragHandle(onClick: nil)
                     Capsule(style: .continuous)
-                        .fill(Color.white.opacity(0.4))
+                        .fill(Color.white.opacity(0.35))
                         .frame(width: 28, height: 3)
                         .allowsHitTesting(false)
                 }
@@ -97,11 +234,7 @@ struct MeetingPromptView: View {
                 .help("Collapse")
             }
 
-            if model.showMeetingPrompt {
-                meetingPromptContent
-            } else {
-                idleExpandedContent
-            }
+            meetingPromptContent
         }
         .padding(14)
         .frame(width: 280)
@@ -118,8 +251,8 @@ struct MeetingPromptView: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
         )
-        .compositingGroup()
-        .shadow(color: .black.opacity(0.28), radius: 14, y: 6)
+        .padding(12)
+        .onHover(perform: handleHover)
     }
 
     private var meetingPromptContent: some View {
@@ -136,7 +269,7 @@ struct MeetingPromptView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Meeting detected")
                         .font(.system(size: 14, weight: .semibold, design: .rounded))
-                    Text(model.detectedMeeting?.appName ?? "Call")
+                    Text(detectedSourceLabel)
                         .font(.system(size: 12, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
@@ -171,38 +304,21 @@ struct MeetingPromptView: View {
             }
         }
     }
-
-    private var idleExpandedContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Fn Dictate")
-                .font(.system(size: 14, weight: .semibold, design: .rounded))
-            Text("Hold Fn to dictate. Meeting notes appear here when a call starts.")
-                .font(.system(size: 11, design: .rounded))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Button {
-                model.collapseFlowSidebar()
-            } label: {
-                Text("Collapse")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
-        }
-    }
 }
 
 /// Hosting controller that keeps its layer fully clear so rounded SwiftUI chrome
 /// isn't boxed by the default opaque (often black) AppKit view background.
+///
+/// Avoid `viewDidLayout` — on recent macOS/Swift runtimes the MainActor executor
+/// check at the top of that override can crash during AppKit display-cycle layout.
 final class ClearHostingController<Content: View>: NSHostingController<Content> {
     override func viewDidLoad() {
         super.viewDidLoad()
         clearBackground()
     }
 
-    override func viewDidLayout() {
-        super.viewDidLayout()
+    override func viewWillAppear() {
+        super.viewWillAppear()
         clearBackground()
     }
 

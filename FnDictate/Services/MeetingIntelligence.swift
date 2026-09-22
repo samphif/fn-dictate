@@ -32,42 +32,77 @@ struct MeetingIntelligence: Sendable {
         segments: [MeetingTranscriptSegment],
         attendees: [String],
         calendarTitle: String?,
-        dictionaryHints: [String]
+        dictionaryHints: [String],
+        rosterNames: [String] = [],
+        lockedSpeakerRenames: [String: String] = [:],
+        remoteOneOnOneName: String? = nil,
+        projectContext: String? = nil
     ) async -> RefineResult {
         let labeled = labeledBody(transcript: transcript, segments: segments)
         let availabilityMessage = appleIntelligenceUnavailableReason()
+        let identityHints = SpeakerLabelNormalizer.IdentityHints(
+            calendarAttendees: attendees,
+            rosterNames: rosterNames,
+            lockedRenames: lockedSpeakerRenames,
+            remoteOneOnOneName: remoteOneOnOneName
+        )
 
         #if canImport(FoundationModels)
         if #available(macOS 26, *), availabilityMessage == nil {
-            if let smart = await smartRefineLongMeeting(
+            if var smart = await smartRefineLongMeeting(
                 labeled: labeled,
                 segments: segments,
                 attendees: attendees,
                 calendarTitle: calendarTitle,
-                dictionaryHints: dictionaryHints
+                dictionaryHints: dictionaryHints,
+                rosterNames: rosterNames,
+                projectContext: projectContext
             ) {
+                let merged = SpeakerLabelNormalizer.normalizeNoteFields(
+                    segments: smart.segments.isEmpty ? segments : smart.segments,
+                    transcript: smart.transcript.isEmpty ? labeled : smart.transcript,
+                    hints: identityHints
+                )
+                smart.segments = merged.segments
+                smart.transcript = merged.transcript
                 return RefineResult(
                     meeting: smart,
                     usedAppleIntelligence: true,
                     message: nil
                 )
             }
-            return fallbackResult(
+            var fallback = fallbackResult(
                 labeled: labeled,
                 segments: segments,
                 calendarTitle: calendarTitle,
                 message: "Apple Intelligence couldn't finish summarizing this meeting. You can retry."
             )
+            let merged = SpeakerLabelNormalizer.normalizeNoteFields(
+                segments: fallback.meeting.segments,
+                transcript: fallback.meeting.transcript,
+                hints: identityHints
+            )
+            fallback.meeting.segments = merged.segments
+            fallback.meeting.transcript = merged.transcript
+            return fallback
         }
         #endif
 
-        return fallbackResult(
+        var fallback = fallbackResult(
             labeled: labeled,
             segments: segments,
             calendarTitle: calendarTitle,
             message: availabilityMessage
                 ?? "Apple Intelligence unavailable — showing a short transcript preview."
         )
+        let merged = SpeakerLabelNormalizer.normalizeNoteFields(
+            segments: fallback.meeting.segments,
+            transcript: fallback.meeting.transcript,
+            hints: identityHints
+        )
+        fallback.meeting.segments = merged.segments
+        fallback.meeting.transcript = merged.transcript
+        return fallback
     }
 
     func catchUp(
@@ -283,19 +318,25 @@ struct MeetingIntelligence: Sendable {
         segments: [MeetingTranscriptSegment],
         attendees: [String],
         calendarTitle: String?,
-        dictionaryHints: [String]
+        dictionaryHints: [String],
+        rosterNames: [String],
+        projectContext: String? = nil
     ) async -> RefinedMeeting? {
-        let people = attendees.isEmpty ? "unknown" : attendees.joined(separator: ", ")
+        let people = knownPeopleList(attendees: attendees, rosterNames: rosterNames)
         let terms = dictionaryHints.prefix(40).joined(separator: ", ")
+        let trimmedProject = projectContext?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let projectText = trimmedProject.isEmpty ? "n/a" : trimmedProject
 
         let notes: RefinedMeeting?
         if labeled.count <= maxChunkCharacters {
             notes = await smartRefineSinglePass(
                 labeled: labeled,
                 attendees: attendees,
+                rosterNames: rosterNames,
                 calendarTitle: calendarTitle,
                 dictionaryHints: dictionaryHints,
-                includeTranscriptRewrite: labeled.count <= 3_500
+                includeTranscriptRewrite: labeled.count <= 3_500,
+                projectContext: projectText
             )
         } else {
             notes = await smartRefineChunked(
@@ -303,7 +344,8 @@ struct MeetingIntelligence: Sendable {
                 segments: segments,
                 people: people,
                 calendarTitle: calendarTitle,
-                terms: terms
+                terms: terms,
+                projectContext: projectText
             )
         }
 
@@ -311,7 +353,8 @@ struct MeetingIntelligence: Sendable {
 
         let relabeled = await relabelSpeakers(
             segments: segments.isEmpty ? refined.segments : segments,
-            attendees: attendees
+            attendees: attendees,
+            rosterNames: rosterNames
         )
         if !relabeled.isEmpty {
             refined.segments = relabeled
@@ -329,15 +372,22 @@ struct MeetingIntelligence: Sendable {
         return refined
     }
 
+    private func knownPeopleList(attendees: [String], rosterNames: [String]) -> String {
+        let merged = (attendees + rosterNames).uniqued()
+        return merged.isEmpty ? "unknown" : merged.joined(separator: ", ")
+    }
+
     @available(macOS 26, *)
     private func smartRefineSinglePass(
         labeled: String,
         attendees: [String],
+        rosterNames: [String],
         calendarTitle: String?,
         dictionaryHints: [String],
-        includeTranscriptRewrite: Bool
+        includeTranscriptRewrite: Bool,
+        projectContext: String
     ) async -> RefinedMeeting? {
-        let people = attendees.isEmpty ? "unknown" : attendees.joined(separator: ", ")
+        let people = knownPeopleList(attendees: attendees, rosterNames: rosterNames)
         let terms = dictionaryHints.prefix(40).joined(separator: ", ")
         let transcriptBlock = includeTranscriptRewrite
             ? """
@@ -352,14 +402,19 @@ struct MeetingIntelligence: Sendable {
         let prompt = """
         Refine this meeting transcript into structured personal notes.
 
-        Known attendees (prefer these spellings for speaker labels): \(people)
+        Known attendees / participants (prefer these spellings for speaker labels): \(people)
+        Project: \(projectContext ?? "n/a")
         Calendar title hint: \(calendarTitle ?? "n/a")
         Preferred spellings / jargon: \(terms.isEmpty ? "n/a" : terms)
 
         Rules:
         - Keep [You] for the local participant.
-        - Relabel [Others] (or mislabeled lines) to a real attendee name when the transcript strongly implies who spoke; otherwise keep [Others] or [You].
+        - Keep existing [Voice N] / person-name labels when they already identify a voice; do not freely rename them.
+        - Relabel [Others] (or mislabeled lines) to a real known name when the transcript strongly implies who spoke; otherwise keep [Others] or [You].
+        - NEVER invent new Voice N / Speaker N labels. Prefer merging uncertain remote speech under [Others] over inventing anonymous voices.
+        - Use one canonical spelling per person (match Known attendees / participants; never emit casing duplicates). Merge obvious casing duplicates.
         - Extract concrete action items with owners when known — even if worded casually ("I'll send…", "can you…").
+        - Owner is who will do the work. Write `[Name] Task` and do not repeat the owner inside the task. Use only known attendees or project people. If the owner is unclear, omit the bracket. Never invent a person, and never copy a name from these instructions.
         - Prefer useful key points over filler. Do not invent facts that aren't supported.
 
         Return exactly:
@@ -368,7 +423,7 @@ struct MeetingIntelligence: Sendable {
         DECISIONS:
         - <key point or decision>
         ACTIONS:
-        - <action item with owner when known>
+        - [Owner] <task the owner will do>
         QUESTIONS:
         - <open question>
         \(transcriptBlock)
@@ -378,7 +433,7 @@ struct MeetingIntelligence: Sendable {
         """
 
         guard let content = await self.prompt(
-            instructions: "You write accurate personal meeting notes. Follow the requested format exactly.",
+            instructions: "You write accurate personal meeting notes. Follow the requested format exactly. Never invent Voice/Speaker N labels.",
             user: prompt
         ) else { return nil }
 
@@ -391,7 +446,8 @@ struct MeetingIntelligence: Sendable {
         segments: [MeetingTranscriptSegment],
         people: String,
         calendarTitle: String?,
-        terms: String
+        terms: String,
+        projectContext: String
     ) async -> RefinedMeeting? {
         let chunks = chunkLabeledTranscript(labeled, segments: segments)
         guard !chunks.isEmpty else { return nil }
@@ -402,6 +458,7 @@ struct MeetingIntelligence: Sendable {
             Extract structured notes from part \(index + 1) of \(chunks.count) of a longer meeting.
 
             Known attendees: \(people)
+            Project: \(projectContext)
             Calendar title hint: \(calendarTitle ?? "n/a")
             Preferred spellings / jargon: \(terms.isEmpty ? "n/a" : terms)
 
@@ -410,11 +467,11 @@ struct MeetingIntelligence: Sendable {
             DECISIONS:
             - <key point or decision from this part>
             ACTIONS:
-            - <action item with owner when known>
+            - [Owner] <task the owner will do>
             QUESTIONS:
             - <open question from this part>
 
-            Omit empty sections' bullets. Do not invent items.
+            Omit empty sections' bullets. Do not invent items. Owner is who will do the work. Write `[Name] Task` using only known attendees or project people. If the owner is unclear, omit the bracket. Never invent a person, and never copy a name from these instructions.
 
             Transcript part:
             \(chunk)
@@ -434,8 +491,9 @@ struct MeetingIntelligence: Sendable {
 
         Calendar title hint: \(calendarTitle ?? "n/a")
         Attendees: \(people)
+        Project: \(projectContext)
 
-        Deduplicate overlapping items. Prefer concrete actions and decisions. Write a coherent overview.
+        Deduplicate overlapping items. Prefer concrete actions and decisions. Write a coherent overview. Owner is who will do the work. Write `[Name] Task` using only known attendees or project people. If the owner is unclear, omit the bracket. Never invent a person, and never copy a name from these instructions.
 
         Return exactly:
         TITLE: <short title>
@@ -443,7 +501,7 @@ struct MeetingIntelligence: Sendable {
         DECISIONS:
         - <key point or decision>
         ACTIONS:
-        - <action item with owner when known>
+        - [Owner] <task the owner will do>
         QUESTIONS:
         - <open question>
 
@@ -469,14 +527,17 @@ struct MeetingIntelligence: Sendable {
     @available(macOS 26, *)
     private func relabelSpeakers(
         segments: [MeetingTranscriptSegment],
-        attendees: [String]
+        attendees: [String],
+        rosterNames: [String]
     ) async -> [MeetingTranscriptSegment] {
         guard !segments.isEmpty else { return [] }
+        let known = (attendees + rosterNames).uniqued()
         let speakers = Set(segments.map(\.speaker))
         let onlyYou = speakers.count == 1 && speakers.contains("You")
         let hasOthers = speakers.contains("Others")
-        // Relabel when we have attendee names and either coarse "Others" labels or a mono "You" mic mix.
-        guard !attendees.isEmpty, onlyYou || hasOthers else {
+        let hasAnonymous = speakers.contains { SpeakerLabelNormalizer.isAnonymousVoiceLabel($0) }
+        // Relabel when we have known names and coarse / over-split labels.
+        guard !known.isEmpty, onlyYou || hasOthers || hasAnonymous else {
             return []
         }
 
@@ -487,11 +548,14 @@ struct MeetingIntelligence: Sendable {
             let prompt = """
             Relabel speakers for these meeting utterances.
 
-            Known attendees: \(attendees.joined(separator: ", "))
+            Known attendees / participants (use these spellings only): \(known.joined(separator: ", "))
             Rules:
             - Keep [You] when the local participant is speaking (first person about their own actions is a hint, not a rule).
-            - Replace [Others] with an attendee name when the content strongly implies who spoke.
-            - If everything is labeled [You] but clearly includes other people talking, relabel those lines to attendees when possible; otherwise leave [You].
+            - Keep existing [Voice N] / person-name labels; do not freely rename identified voices.
+            - Replace [Others] with a known name when the content strongly implies who spoke; otherwise keep [Others].
+            - Merge casing duplicates of the same person. Never invent new Voice/Speaker numbers; map uncertain anonymous labels to a known name when clear, otherwise [Others].
+            - Prefer fewer speaker labels over more. Do not over-split.
+            - If everything is labeled [You] but clearly includes other people talking, relabel those lines to known names when possible; otherwise leave [You] or use [Others].
             - Do not change the spoken text — only the [Speaker] label.
             - Return the same number of lines, one per input line, as [Speaker] text.
 
@@ -499,7 +563,7 @@ struct MeetingIntelligence: Sendable {
             \(body)
             """
             guard let content = await self.prompt(
-                instructions: "You only relabel speakers. Preserve utterance text. One [Speaker] line per input line.",
+                instructions: "You only relabel speakers. Preserve utterance text. Merge over-split Voice/Speaker labels. Never invent Voice N. One [Speaker] line per input line.",
                 user: prompt
             ) else {
                 result.append(contentsOf: batch)
@@ -509,7 +573,9 @@ struct MeetingIntelligence: Sendable {
             if parsed.count == batch.count {
                 for (index, seg) in batch.enumerated() {
                     var updated = seg
-                    updated.speaker = parsed[index].speaker
+                    if seg.voiceID == nil {
+                        updated.speaker = parsed[index].speaker
+                    }
                     result.append(updated)
                 }
             } else {
@@ -578,17 +644,47 @@ struct MeetingIntelligence: Sendable {
         return chunks
     }
 
+    /// Resumes a continuation at most once so a model timeout can't double-resume.
+    private final class PromptResumeGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<String?, Never>?
+
+        init(_ continuation: CheckedContinuation<String?, Never>) {
+            self.continuation = continuation
+        }
+
+        func resume(_ value: String?) {
+            lock.lock()
+            let pending = continuation
+            continuation = nil
+            lock.unlock()
+            pending?.resume(returning: value)
+        }
+    }
+
     @available(macOS 26, *)
     private func prompt(instructions: String, user: String) async -> String? {
         let model = SystemLanguageModel.default
         guard case .available = model.availability else { return nil }
-        do {
-            let session = LanguageModelSession(model: model, instructions: instructions)
-            let response = try await session.respond(to: user)
-            let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
-            return text.isEmpty ? nil : text
-        } catch {
-            return nil
+        let session = LanguageModelSession(model: model, instructions: instructions)
+        return await withCheckedContinuation { continuation in
+            let gate = PromptResumeGate(continuation)
+            let work = Task {
+                let text: String?
+                do {
+                    let response = try await session.respond(to: user)
+                    let trimmed = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    text = trimmed.isEmpty ? nil : trimmed
+                } catch {
+                    text = nil
+                }
+                gate.resume(text)
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(90))
+                work.cancel()
+                gate.resume(nil)
+            }
         }
     }
 

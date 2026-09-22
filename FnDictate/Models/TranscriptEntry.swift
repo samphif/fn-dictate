@@ -33,4 +33,8 @@ struct TranscriptEntry: Identifiable, Codable, Equatable, Sendable {
     var isRevised: Bool {
         updatedAt != nil
     }
+
+    var wordCount: Int {
+        text.split { $0.isWhitespace || $0.isNewline }.count
+    }
 }

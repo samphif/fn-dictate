@@ -13,12 +13,14 @@ enum ASRHintBuilder: Sendable {
         preferredSpellings: [String],
         recentVocabulary: [String],
         attendees: [String] = [],
+        contextTerms: [String] = [],
         limit: Int
     ) -> [String] {
         let people = normalize(attendees, droppingStopwords: false)
+        let context = normalize(contextTerms, droppingStopwords: false)
         let preferred = normalize(preferredSpellings, droppingStopwords: false)
         let recent = normalize(recentVocabulary, droppingStopwords: true)
-        return uniquedPreservingOrder(people + preferred + recent, limit: max(limit, 0))
+        return uniquedPreservingOrder(people + context + preferred + recent, limit: max(limit, 0))
     }
 
     static func isStopword(_ token: String) -> Bool {

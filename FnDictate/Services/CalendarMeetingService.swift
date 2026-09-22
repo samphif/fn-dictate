@@ -1,3 +1,4 @@
+import AppKit
 import EventKit
 import Foundation
 import Observation
@@ -10,6 +11,20 @@ struct CalendarMeetingContext: Equatable, Sendable {
     let attendees: [String]
     let location: String?
     let notes: String?
+
+    /// Wispr-style 1:1 shortcut: exactly one remote person we can name onto Others.
+    /// Calendar often lists only the other party; when two names appear we cannot
+    /// reliably know which is "You" without account identity, so we stay conservative.
+    var remoteOneOnOneName: String? {
+        let cleaned = attendees
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .uniqued()
+        if cleaned.count == 1 {
+            return cleaned[0]
+        }
+        return nil
+    }
 }
 
 /// Looks up the Calendar event overlapping "now" (or next soon) for speaker names + briefs.
@@ -17,11 +32,34 @@ struct CalendarMeetingContext: Equatable, Sendable {
 @Observable
 final class CalendarMeetingService {
     var authorizationStatus: EKAuthorizationStatus = .notDetermined
+
     var isAuthorized: Bool {
-        authorizationStatus == .fullAccess
+        switch authorizationStatus {
+        case .fullAccess:
+            return true
+        case .authorized:
+            // Legacy status from older OS / SDK mappings.
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Already denied/restricted — must change in System Settings (re-prompt never shows).
+    var needsOpenSettings: Bool {
+        switch authorizationStatus {
+        case .denied, .restricted:
+            return true
+        default:
+            return false
+        }
     }
 
     private let store = EKEventStore()
+
+    init() {
+        refreshStatus()
+    }
 
     func refreshStatus() {
         authorizationStatus = EKEventStore.authorizationStatus(for: .event)
@@ -31,13 +69,33 @@ final class CalendarMeetingService {
     func requestAccess() async -> Bool {
         refreshStatus()
         if isAuthorized { return true }
+        // Denied/restricted: calling request again never shows UI — open Settings instead.
+        if needsOpenSettings {
+            return false
+        }
         do {
             let granted = try await store.requestFullAccessToEvents()
             refreshStatus()
-            return granted
+            if granted || isAuthorized {
+                // Store may have been created before grant; reset so fetches see calendars.
+                store.reset()
+            }
+            return granted || isAuthorized
         } catch {
             refreshStatus()
-            return false
+            return isAuthorized
+        }
+    }
+
+    func openCalendarSettings() {
+        let candidates = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Calendars",
+        ]
+        for string in candidates {
+            if let url = URL(string: string), NSWorkspace.shared.open(url) {
+                return
+            }
         }
     }
 
