@@ -3,6 +3,7 @@ import Foundation
 struct DictionaryEntry: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
     /// Misheard / incorrect form (matched case-insensitively as a whole word).
+    /// Empty when this is a hint-only preferred spelling (no replacement pair yet).
     var incorrect: String
     /// Preferred spelling / display form.
     var correct: String
@@ -24,5 +25,10 @@ struct DictionaryEntry: Identifiable, Codable, Equatable, Sendable {
         self.createdAt = createdAt
         self.useCount = useCount
         self.isStarred = isStarred
+    }
+
+    /// Preferred spelling with no known mishear — used only as ASR / cleanup vocabulary.
+    var isHintOnly: Bool {
+        incorrect.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 }

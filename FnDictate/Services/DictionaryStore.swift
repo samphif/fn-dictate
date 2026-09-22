@@ -32,11 +32,17 @@ final class DictionaryStore {
     func add(incorrect: String, correct: String, starred: Bool = false) {
         let bad = incorrect.trimmingCharacters(in: .whitespacesAndNewlines)
         let good = correct.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !bad.isEmpty, !good.isEmpty, bad.caseInsensitiveCompare(good) != .orderedSame else { return }
+        guard !good.isEmpty else { return }
+
+        // Identical pair (or empty heard-as) is a boost-only preferred spelling.
+        if bad.isEmpty || bad.caseInsensitiveCompare(good) == .orderedSame {
+            addHintOnly(good, starred: starred)
+            return
+        }
         guard Self.isSafeCorrection(incorrect: bad, correct: good) else { return }
 
         if let index = entries.firstIndex(where: {
-            $0.incorrect.caseInsensitiveCompare(bad) == .orderedSame
+            !$0.incorrect.isEmpty && $0.incorrect.caseInsensitiveCompare(bad) == .orderedSame
         }) {
             entries[index].correct = good
             entries[index].isStarred = starred || entries[index].isStarred
@@ -46,6 +52,24 @@ final class DictionaryStore {
                 at: 0
             )
         }
+        sortEntries()
+        save()
+    }
+
+    /// Adds a preferred spelling used as ASR / cleanup vocabulary without a replacement pair.
+    private func addHintOnly(_ spelling: String, starred: Bool) {
+        if let index = entries.firstIndex(where: {
+            $0.correct.caseInsensitiveCompare(spelling) == .orderedSame
+        }) {
+            entries[index].isStarred = starred || entries[index].isStarred
+            sortEntries()
+            save()
+            return
+        }
+        entries.insert(
+            DictionaryEntry(incorrect: "", correct: spelling, isStarred: starred),
+            at: 0
+        )
         sortEntries()
         save()
     }
@@ -145,6 +169,7 @@ final class DictionaryStore {
         var usedIDs: [UUID] = []
 
         for entry in sorted {
+            guard !entry.incorrect.isEmpty else { continue }
             guard Self.isSafeCorrection(incorrect: entry.incorrect, correct: entry.correct) else {
                 continue
             }
@@ -153,15 +178,15 @@ final class DictionaryStore {
                 continue
             }
             let range = NSRange(result.startIndex..<result.endIndex, in: result)
-            let matches = regex.numberOfMatches(in: result, options: [], range: range)
-            guard matches > 0 else { continue }
+            let matches = regex.matches(in: result, options: [], range: range)
+            guard !matches.isEmpty else { continue }
 
-            result = regex.stringByReplacingMatches(
-                in: result,
-                options: [],
-                range: range,
-                withTemplate: entry.correct
-            )
+            // Replace from the end so earlier ranges stay valid. Avoid `withTemplate`
+            // so preferred spellings that contain `$` are not treated as backreferences.
+            for match in matches.reversed() {
+                guard let matchRange = Range(match.range, in: result) else { continue }
+                result.replaceSubrange(matchRange, with: entry.correct)
+            }
             usedIDs.append(entry.id)
         }
 

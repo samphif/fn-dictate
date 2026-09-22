@@ -365,7 +365,7 @@ final class AppModel {
 
     /// Runs the same cleanup used at paste time (for Edit Formatted preview).
     func cleanedText(_ text: String, tone: CleanupTone) async -> String {
-        await cleaner.clean(text, tone: tone)
+        await cleaner.clean(text, tone: tone, preserveTerms: dictionary.preferredSpellings)
     }
 
     /// Curated defaults + history apps + orphan overrides for Library → Formatting.
@@ -740,7 +740,11 @@ final class AppModel {
         let tone = effectiveTone(bundleID: bundleID, name: name)
         currentTone = tone
         statusMessage = "Cleaning up…"
-        let cleaned = await cleaner.clean(commanded, tone: tone)
+        let cleaned = await cleaner.clean(
+            commanded,
+            tone: tone,
+            preserveTerms: dictionary.preferredSpellings
+        )
         let finalized = dictionary.apply(to: cleaned)
 
         if !finalized.isEmpty {
@@ -757,7 +761,6 @@ final class AppModel {
             // Do not learn ASR → polished text into the dictionary. Polish rewrites
             // invent false pairs (e.g. `to` → `You`) that then corrupt later pastes.
             // Learning only happens from explicit user edits / in-app corrections.
-
             startInAppCorrectionWatch(pasted: finalized, targetApp: target, historyEntryID: entry.id)
         } else {
             statusMessage = "No speech detected"
@@ -1540,17 +1543,15 @@ final class AppModel {
     }
 
     private func meetingHints(attendees: [String]) -> [String] {
-        let spellings = Array(dictionary.preferredSpellings.prefix(40))
-        let incorrects = dictionary.entries.map(\.incorrect)
-        let recent = history.recentVocabulary(limit: 30)
-        let voices = speakerTracker.voices.rememberedNames
-        let projectNames = projects.projects.map(\.name)
-        let people = projects.projects.flatMap(\.people)
-        let roster = liveParticipantRoster
-        return Array(
-            (attendees + voices + projectNames + people + roster + spellings + incorrects + recent)
-                .uniqued()
-                .prefix(100)
+        ASRHintBuilder.makeHints(
+            preferredSpellings: dictionary.preferredSpellings,
+            recentVocabulary: history.recentVocabulary(limit: 40),
+            attendees: attendees,
+            contextTerms: speakerTracker.voices.rememberedNames
+                + projects.projects.map(\.name)
+                + projects.projects.flatMap(\.people)
+                + liveParticipantRoster,
+            limit: ASRHintBuilder.meetingLimit
         )
     }
 
@@ -1627,18 +1628,14 @@ final class AppModel {
     }
 
     private func dictionaryHints() -> [String] {
-        let spellings = Array(dictionary.preferredSpellings.prefix(40))
-        let incorrects = dictionary.entries.map(\.incorrect)
-        let recent = history.recentVocabulary(limit: 40)
-        let projectNames = projects.projects.map(\.name)
-        let people = projects.projects.flatMap(\.people)
-        let roster = liveParticipantRoster
-        let attendees = upcomingCalendarMeeting?.attendees ?? []
-        // Prefer correct spellings as ASR context; include projects, people, roster.
-        return Array(
-            (spellings + projectNames + people + roster + attendees + incorrects + recent)
-                .uniqued()
-                .prefix(100)
+        ASRHintBuilder.makeHints(
+            preferredSpellings: dictionary.preferredSpellings,
+            recentVocabulary: history.recentVocabulary(limit: 40),
+            attendees: upcomingCalendarMeeting?.attendees ?? [],
+            contextTerms: projects.projects.map(\.name)
+                + projects.projects.flatMap(\.people)
+                + liveParticipantRoster,
+            limit: ASRHintBuilder.dictationLimit
         )
     }
 

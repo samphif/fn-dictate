@@ -53,6 +53,7 @@ final class HistoryStore {
             for raw in entry.text.components(separatedBy: separators) {
                 let word = raw.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard word.count >= 3 else { continue }
+                guard !ASRHintBuilder.isStopword(word) else { continue }
                 let key = word.lowercased()
                 guard seen.insert(key).inserted else { continue }
                 words.append(word)
