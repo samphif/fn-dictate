@@ -1364,35 +1364,14 @@ final class AppModel {
         let onlyYouLive = updated.segments.allSatisfy {
             $0.speaker.caseInsensitiveCompare("You") == .orderedSame
         }
-        // In-person / shared mic: both people hit the same microphone, so live labels are
-        // all You. Dual-channel only helps when system audio actually has remote speech.
-        let remoteSpeech = MeetingDiarizer.hasMeaningfulSpeech(othersSamples, versusMic: youSamples)
-        let useSharedMic = onlyYouLive || !remoteSpeech
+        guard let input = MeetingDiarizer.input(
+            youSamples: youSamples,
+            othersSamples: othersSamples,
+            liveLabelsAllYou: onlyYouLive
+        ) else { return updated }
 
-        let samples: [Float]
-        let treatMicAsYou: Bool
-        if useSharedMic {
-            guard !youSamples.isEmpty else { return updated }
-            // Prefer mic; mix in quiet system only if it adds energy (speaker playback).
-            samples = remoteSpeech
-                ? MeetingDiarizer.mix(youSamples, othersSamples)
-                : youSamples
-            treatMicAsYou = false
-        } else {
-            samples = othersSamples.count >= youSamples.count
-                ? othersSamples
-                : MeetingDiarizer.mix(youSamples, othersSamples)
-            treatMicAsYou = true
-        }
-
-        let turns = await meetingDiarizer.diarize(samples)
+        let turns = await meetingDiarizer.diarize(input.samples)
         guard !turns.isEmpty else { return updated }
-
-        let distinct = Set(turns.map(\.speakerIndex))
-        // Shared-mic with only one Sortformer slot → nothing to split.
-        if useSharedMic, distinct.count < 2 {
-            return updated
-        }
 
         let hints = MeetingSpeakerAttribution.Hints(
             calendarAttendees: updated.attendees,
@@ -1404,7 +1383,7 @@ final class AppModel {
             segments: updated.segments,
             turns: turns,
             hints: hints,
-            treatMicrophoneAsYou: treatMicAsYou
+            treatMicrophoneAsYou: !input.isSharedMic
         )
         return updated
     }

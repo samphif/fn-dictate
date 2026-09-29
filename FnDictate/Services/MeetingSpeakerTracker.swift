@@ -13,7 +13,11 @@ enum MeetingTurnDecision: Sendable {
 /// line wins — unless that audio matches your saved voice, in which case it was you.
 @MainActor
 final class MeetingSpeakerTracker {
-    let voices = VoiceProfileStore()
+    let voices: VoiceProfileStore
+
+    init(voices: VoiceProfileStore = VoiceProfileStore()) {
+        self.voices = voices
+    }
 
     private struct Turn {
         var segmentID: UUID

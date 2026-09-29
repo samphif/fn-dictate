@@ -8,6 +8,13 @@ struct MeetingDiarizerTurn: Sendable, Equatable {
     var endTime: TimeInterval
 }
 
+/// Which audio to diarize after a meeting, and whether the mic channel is only the local user.
+struct MeetingDiarizationInput: Sendable, Equatable {
+    var samples: [Float]
+    /// In person: everyone is on the mic, so mic lines can be relabeled away from You.
+    var isSharedMic: Bool
+}
+
 /// Post-meeting acoustic diarization via FluidAudio Offline Sortformer (Core ML).
 /// Live path stays You/Others; this runs after stop on buffered 16 kHz PCM.
 actor MeetingDiarizer {
@@ -108,5 +115,25 @@ actor MeetingDiarizer {
             return system >= micEnergy * 0.12
         }
         return true
+    }
+
+    /// In-person / shared mic: both people hit the same microphone, so live labels are
+    /// all You. Dual-channel only helps when system audio actually has remote speech.
+    static func input(
+        youSamples: [Float],
+        othersSamples: [Float],
+        liveLabelsAllYou: Bool
+    ) -> MeetingDiarizationInput? {
+        let remoteSpeech = hasMeaningfulSpeech(othersSamples, versusMic: youSamples)
+        if liveLabelsAllYou || !remoteSpeech {
+            guard !youSamples.isEmpty else { return nil }
+            // Prefer mic; mix in system only when it carries speech (speaker playback).
+            let samples = remoteSpeech ? mix(youSamples, othersSamples) : youSamples
+            return MeetingDiarizationInput(samples: samples, isSharedMic: true)
+        }
+        let samples = othersSamples.count >= youSamples.count
+            ? othersSamples
+            : mix(youSamples, othersSamples)
+        return MeetingDiarizationInput(samples: samples, isSharedMic: false)
     }
 }
