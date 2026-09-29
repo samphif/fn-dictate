@@ -22,13 +22,13 @@ struct MeetingSpeakerAttributionTests {
     private func sharedMic(
         _ segments: [MeetingTranscriptSegment],
         turns: [MeetingDiarizerTurn],
-        hints: MeetingSpeakerAttribution.Hints = .init()
+        hints: SpeakerLabelNormalizer.IdentityHints = .init()
     ) -> [String] {
         MeetingSpeakerAttribution.apply(
             segments: segments,
             turns: turns,
-            hints: hints,
-            treatMicrophoneAsYou: false
+            channel: .microphone,
+            hints: hints
         ).map(\.speaker)
     }
 
@@ -50,14 +50,14 @@ struct MeetingSpeakerAttributionTests {
         let result = MeetingSpeakerAttribution.apply(
             segments: sharedMicSegments,
             turns: turns,
-            hints: .init(calendarAttendees: ["Jodi"]),
-            treatMicrophoneAsYou: false
+            channel: .microphone,
+            hints: .init(calendarAttendees: ["Jodi"])
         )
         #expect(result == sharedMicSegments)
     }
 
     @Test func sharedMicOneOnOneNamesTheOtherVoice() {
-        let hints = MeetingSpeakerAttribution.Hints(remoteOneOnOneName: "Jodi")
+        let hints = SpeakerLabelNormalizer.IdentityHints(remoteOneOnOneName: "Jodi")
         #expect(sharedMic(sharedMicSegments, turns: twoSpeakerTurns, hints: hints) == ["You", "Jodi", "You", "Jodi"])
     }
 
@@ -74,7 +74,7 @@ struct MeetingSpeakerAttributionTests {
             Fixtures.turn(1, 20, 22),
             Fixtures.turn(2, 30, 31),
         ]
-        let hints = MeetingSpeakerAttribution.Hints(
+        let hints = SpeakerLabelNormalizer.IdentityHints(
             calendarAttendees: ["Jodi", " ", "Voice 3"],
             rosterNames: ["jodi", "Virginia"]
         )
@@ -92,12 +92,12 @@ struct MeetingSpeakerAttributionTests {
             Fixtures.turn(1, 10, 12),
             Fixtures.turn(2, 20, 22),
         ]
-        let hints = MeetingSpeakerAttribution.Hints(calendarAttendees: ["Jodi"])
+        let hints = SpeakerLabelNormalizer.IdentityHints(calendarAttendees: ["Jodi"])
         #expect(sharedMic(segments, turns: turns, hints: hints) == ["You", "Jodi", "Speaker 3"])
     }
 
     @Test func lockedRenamesWinOverAutomaticNames() {
-        let hints = MeetingSpeakerAttribution.Hints(lockedRenames: ["Speaker 2": "Virginia"])
+        let hints = SpeakerLabelNormalizer.IdentityHints(lockedRenames: ["Speaker 2": "Virginia"])
         #expect(sharedMic(sharedMicSegments, turns: twoSpeakerTurns, hints: hints) == ["You", "Virginia", "You", "Virginia"])
     }
 
@@ -115,7 +115,7 @@ struct MeetingSpeakerAttributionTests {
     @Test func dualChannelKeepsMicLinesAsYouAndSplitsRemote() {
         let segments = [
             Fixtures.segment("You", at: 0),
-            MeetingTranscriptSegment(startOffset: 5, text: "hi", speaker: "Others", voiceID: UUID()),
+            MeetingTranscriptSegment(startOffset: 5, text: "hi", speaker: "Others", voiceID: UUID(), channel: .system),
             Fixtures.segment("Others", at: 12),
         ]
         let turns = [
@@ -126,8 +126,8 @@ struct MeetingSpeakerAttributionTests {
         let result = MeetingSpeakerAttribution.apply(
             segments: segments,
             turns: turns,
-            hints: .init(),
-            treatMicrophoneAsYou: true
+            channel: .system,
+            hints: .init()
         )
         #expect(result.map(\.speaker) == ["You", "Speaker 1", "Speaker 2"])
         #expect(result.allSatisfy { $0.voiceID == nil })
@@ -144,13 +144,34 @@ struct MeetingSpeakerAttributionTests {
         let result = MeetingSpeakerAttribution.apply(
             segments: segments,
             turns: turns,
-            hints: .init(remoteOneOnOneName: "Jodi"),
-            treatMicrophoneAsYou: true
+            channel: .system,
+            hints: .init(remoteOneOnOneName: "Jodi")
         )
         #expect(result.map(\.speaker) == ["You", "Jodi", "Jodi"])
     }
 
+    @Test func dualChannelKeepsSystemLinesMatchedToYourVoice() {
+        let segments = [
+            Fixtures.segment("You", at: 0, channel: .system),
+            Fixtures.segment("Others", at: 5),
+        ]
+        let turns = [Fixtures.turn(0, 0, 3), Fixtures.turn(1, 5, 8)]
+        let result = MeetingSpeakerAttribution.apply(segments: segments, turns: turns, channel: .system, hints: .init())
+        #expect(result.map(\.speaker) == ["You", "Speaker 2"])
+    }
+
+    @Test func onlyTheDiarizedChannelIsRelabeled() {
+        let segments = sharedMicSegments + [Fixtures.segment("You", at: 5, channel: .system)]
+        #expect(sharedMic(segments, turns: twoSpeakerTurns) == ["You", "Speaker 2", "You", "Speaker 2", "You"])
+    }
+
+    @Test func nameWithoutDiarizationAppliesOneOnOneName() {
+        let segments = [Fixtures.segment("You", at: 0), Fixtures.segment("Others", at: 5)]
+        let result = MeetingSpeakerAttribution.name(segments: segments, hints: .init(remoteOneOnOneName: "Jodi"))
+        #expect(result.map(\.speaker) == ["You", "Jodi"])
+    }
+
     @Test func emptySegmentsReturnEmpty() {
-        #expect(MeetingSpeakerAttribution.apply(segments: [], turns: twoSpeakerTurns, hints: .init()).isEmpty)
+        #expect(MeetingSpeakerAttribution.apply(segments: [], turns: twoSpeakerTurns, channel: .microphone, hints: .init()).isEmpty)
     }
 }

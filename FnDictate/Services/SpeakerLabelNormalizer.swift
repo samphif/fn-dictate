@@ -96,8 +96,7 @@ enum SpeakerLabelNormalizer {
     }
 
     private static func pickCanonical(key: String, variants: [String], preferred: [String]) -> String {
-        if key == "you" { return "You" }
-        if key == "others" || key == "them" || key == "other" { return "Others" }
+        if let fixed = fixedLabel(key) { return fixed }
 
         if let hit = preferred.first(where: { $0.lowercased() == key }) {
             return hit
@@ -126,15 +125,17 @@ enum SpeakerLabelNormalizer {
     private static func canonicalizeToken(_ speaker: String, preferred: [String]) -> String {
         let trimmed = speaker.trimmingCharacters(in: .whitespacesAndNewlines)
         let key = foldKey(trimmed)
-        if key == "you" { return "You" }
-        if key == "others" || key == "them" || key == "other" { return "Others" }
-        if let hit = preferred.first(where: { $0.lowercased() == key }) {
-            return hit
+        if let fixed = fixedLabel(key) { return fixed }
+        return preferred.first(where: { $0.lowercased() == key }) ?? trimmed
+    }
+
+    /// You and Others always use one spelling, whatever the variant ("them", "YOU").
+    private static func fixedLabel(_ speaker: String) -> String? {
+        switch SpeakerRole(speaker) {
+        case .you: SpeakerRole.you.label
+        case .others: SpeakerRole.others.label
+        case .slot, .legacyVoice, .named: nil
         }
-        if isAnonymousVoiceLabel(trimmed) {
-            return trimmed
-        }
-        return trimmed
     }
 
     private static func foldKey(_ speaker: String) -> String {
@@ -143,25 +144,12 @@ enum SpeakerLabelNormalizer {
 
     // MARK: - Voice / Speaker N collapse
 
-    /// Anonymous labels like "Voice 3", "Speaker 12", "speaker-1".
-    static func isAnonymousVoiceLabel(_ speaker: String) -> Bool {
-        let trimmed = speaker.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lower = trimmed.lowercased()
-        if lower == "others" || lower == "you" { return false }
-        // Voice 1, Speaker 2, Speaker N, voice-3
-        let pattern = #"^(voice|speaker)\s*[-_]?\s*\d+$"#
-        return trimmed.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
-    }
-
     private static func collapseAnonymousVoices(
         segments: [MeetingTranscriptSegment],
         preferred: [String],
         remoteOneOnOne: String?
     ) -> [MeetingTranscriptSegment] {
-        let anonymous = Set(
-            segments.map(\.speaker).filter { isAnonymousVoiceLabel($0) }
-        )
-        guard !anonymous.isEmpty else { return segments }
+        guard segments.contains(where: \.role.isAnonymous) else { return segments }
 
         // 1:1 calendar: all anonymous remote → that one person.
         if let remote = remoteOneOnOne,
@@ -169,24 +157,19 @@ enum SpeakerLabelNormalizer {
            preferred.filter({ $0 != "You" }).count <= 1
         {
             return segments.map { seg in
-                guard isAnonymousVoiceLabel(seg.speaker) else { return seg }
+                guard seg.role.isAnonymous else { return seg }
                 var copy = seg
                 copy.speaker = remote
                 return copy
             }
         }
 
-        // Without acoustic clustering we cannot responsibly keep Voice 1…N as distinct people.
-        // Sortformer post-pass uses Speaker N; keep those. Collapse legacy Voice N → Others.
+        // Speaker N comes from acoustic diarization and marks a distinct person. Voice N
+        // came from spectral guessing, so it can't be trusted to mean one person.
         return segments.map { seg in
-            guard isAnonymousVoiceLabel(seg.speaker) else { return seg }
-            // "Speaker N" from Sortformer is intentional — keep until naming maps it.
-            let lower = seg.speaker.lowercased()
-            if lower.hasPrefix("speaker") {
-                return seg
-            }
+            guard case .legacyVoice = seg.role else { return seg }
             var copy = seg
-            copy.speaker = "Others"
+            copy.speaker = SpeakerRole.others.label
             return copy
         }
     }

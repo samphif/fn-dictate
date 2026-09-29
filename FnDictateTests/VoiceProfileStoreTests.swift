@@ -129,8 +129,8 @@ struct VoiceProfileStoreTests {
         defer { temp.remove() }
         let store = VoiceProfileStore(directory: temp.url)
 
-        #expect(store.labelRemote(embedding: nil) == store.othersLabel)
-        #expect(store.labelRemote(embedding: Fixtures.voiceprint(axis: 9)) == store.othersLabel)
+        #expect(store.matchCommittedRemote(Fixtures.voiceprint(axis: 9)) == nil)
+        store.endSession()
         #expect(store.profiles.count == 1)
     }
 }

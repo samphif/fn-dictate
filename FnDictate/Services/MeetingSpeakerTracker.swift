@@ -41,9 +41,8 @@ final class MeetingSpeakerTracker {
     var preferredRemoteName: String?
 
     var lastRemoteLabel: String {
-        recent.reversed().first(where: {
-            $0.channel == .system && $0.speaker.caseInsensitiveCompare("You") != .orderedSame
-        })?.speaker ?? "Others"
+        recent.last(where: { $0.channel == .system && SpeakerRole($0.speaker) != .you })?.speaker
+            ?? SpeakerRole.others.label
     }
 
     func begin() {
@@ -53,13 +52,13 @@ final class MeetingSpeakerTracker {
         voices.beginSession()
     }
 
-    func end(keepingWeakVoices: Bool) {
+    func end() {
         for sample in pendingUserSamples {
             voices.observeUser(sample.embedding)
         }
         pendingUserSamples.removeAll()
         recent.removeAll()
-        voices.endSession(keepingWeakVoices: keepingWeakVoices)
+        voices.endSession()
     }
 
     func noteRename(id: UUID, to name: String) {
@@ -97,7 +96,8 @@ final class MeetingSpeakerTracker {
             startOffset: offset,
             text: text,
             speaker: label.name,
-            voiceID: label.isUser ? nil : label.id
+            voiceID: label.isUser ? nil : label.id,
+            channel: channel
         )
         if channel == .microphone, let embedding, label.isUser {
             pendingUserSamples.append(
@@ -182,16 +182,14 @@ final class MeetingSpeakerTracker {
     }
 
     private func stickyRemoteLabel(at offset: TimeInterval) -> VoiceLabel? {
-        // Prefer a named/remembered remote; otherwise stick to the last non-You system label.
-        guard let last = recent.last(where: {
-            $0.channel == .system && $0.speaker.caseInsensitiveCompare("You") != .orderedSame
-        }) else {
+        // Keep a recent real identity; generic Others isn't worth sticking to.
+        guard let last = recent.last(where: { $0.channel == .system && SpeakerRole($0.speaker) != .you }),
+              SpeakerRole(last.speaker) != .others
+        else {
             return nil
         }
         let gap = offset - last.offset
         guard gap >= 0, gap < 4.0 else { return nil }
-        // Only sticky-reuse when we already have a real identity (not generic Others).
-        guard last.speaker.caseInsensitiveCompare("Others") != .orderedSame else { return nil }
         return VoiceLabel(name: last.speaker, id: last.voiceID, isUser: false)
     }
 

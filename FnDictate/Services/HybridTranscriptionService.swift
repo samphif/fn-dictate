@@ -2,10 +2,14 @@ import AVFoundation
 import FluidAudio
 import Foundation
 
-/// Result of finishing a hybrid session — transcript plus 16 kHz mono PCM for diarization.
+/// Result of finishing a hybrid session: transcript, 16 kHz mono PCM for diarization, and
+/// Parakeet word timings (empty when Apple's transcript was kept).
 struct HybridFinishResult: Sendable {
     var text: String
     var samples: [Float]
+    var words: [TimedWord] = []
+
+    static let empty = HybridFinishResult(text: "", samples: [])
 }
 
 /// Apple Speech for live partials/segments + Parakeet v2 batch on the buffered PCM at finish.
@@ -64,12 +68,11 @@ actor HybridTranscriptionService: TranscriptionEngine {
         let appleText = await apple.finish(timeout: timeout)
 
         guard Self.shouldRefineWithParakeet(mode: mode, sampleCount: samples.count),
-              let refined = await parakeet.transcribe(samples, timeout: timeout),
-              !refined.isEmpty
+              let refined = await parakeet.transcribe(samples, timeout: timeout)
         else {
             return HybridFinishResult(text: appleText, samples: samples)
         }
-        return HybridFinishResult(text: refined, samples: samples)
+        return HybridFinishResult(text: refined.text, samples: samples, words: refined.words)
     }
 
     /// Too little audio for Parakeet — keep Apple.

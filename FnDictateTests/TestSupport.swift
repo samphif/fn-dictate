@@ -51,8 +51,19 @@ enum Fixtures {
         )
     }
 
-    static func segment(_ speaker: String, at offset: TimeInterval, _ text: String = "hello there") -> MeetingTranscriptSegment {
-        MeetingTranscriptSegment(startOffset: offset, text: text, speaker: speaker)
+    /// You lines default to the microphone and everyone else to system audio, as live capture labels them.
+    static func segment(
+        _ speaker: String,
+        at offset: TimeInterval,
+        _ text: String = "hello there",
+        channel: MeetingAudioChannel? = nil
+    ) -> MeetingTranscriptSegment {
+        MeetingTranscriptSegment(
+            startOffset: offset,
+            text: text,
+            speaker: speaker,
+            channel: channel ?? (SpeakerRole(speaker) == .you ? .microphone : .system)
+        )
     }
 
     static func turn(_ speaker: Int, _ start: TimeInterval, _ end: TimeInterval) -> MeetingDiarizerTurn {

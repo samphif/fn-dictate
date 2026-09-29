@@ -197,7 +197,7 @@ struct MeetingSpeakerTrackerTests {
         defer { temp.remove() }
         let tracker = try makeTracker(temp)
         _ = tracker.resolve(text: "let's get started", offset: 1, channel: .microphone, embedding: userVoice)
-        tracker.end(keepingWeakVoices: false)
+        tracker.end()
 
         let user = try #require(try temp.readProfiles().first(where: \.isUser))
         #expect(user.sampleCount == 6)

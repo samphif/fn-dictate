@@ -13,16 +13,6 @@ struct SpeakerLabelNormalizerTests {
         return SpeakerLabelNormalizer.normalize(segments: segments, hints: hints).map(\.speaker)
     }
 
-    @Test(arguments: ["Voice 3", "Speaker 12", "speaker-1", "voice_2", "SPEAKER 4", " Voice 7 "])
-    func recognizesAnonymousLabels(_ label: String) {
-        #expect(SpeakerLabelNormalizer.isAnonymousVoiceLabel(label))
-    }
-
-    @Test(arguments: ["You", "Others", "Speaker", "Jodi", "Voice of reason", "Speaker 2 Jodi"])
-    func rejectsNamedLabels(_ label: String) {
-        #expect(!SpeakerLabelNormalizer.isAnonymousVoiceLabel(label))
-    }
-
     @Test func canonicalizesYouAndOthersSynonyms() {
         #expect(speakers(["you", "YOU", "them", "Other", "others"]) == ["You", "You", "Others", "Others", "Others"])
     }

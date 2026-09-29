@@ -535,7 +535,7 @@ struct MeetingIntelligence: Sendable {
         let speakers = Set(segments.map(\.speaker))
         let onlyYou = speakers.count == 1 && speakers.contains("You")
         let hasOthers = speakers.contains("Others")
-        let hasAnonymous = speakers.contains { SpeakerLabelNormalizer.isAnonymousVoiceLabel($0) }
+        let hasAnonymous = speakers.contains { SpeakerRole($0).isAnonymous }
         // Relabel when we have known names and coarse / over-split labels.
         guard !known.isEmpty, onlyYou || hasOthers || hasAnonymous else {
             return []
