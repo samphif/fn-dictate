@@ -18,6 +18,10 @@ enum MeetingSpeakerAttribution {
         treatMicrophoneAsYou: Bool = true
     ) -> [MeetingTranscriptSegment] {
         guard !segments.isEmpty else { return segments }
+        // Shared mic with only one Sortformer slot → nothing to split.
+        if !treatMicrophoneAsYou, Set(turns.map(\.speakerIndex)).count < 2 {
+            return segments
+        }
 
         var labeled = assignSlots(
             segments: segments,

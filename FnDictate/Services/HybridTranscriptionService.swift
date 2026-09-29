@@ -63,21 +63,18 @@ actor HybridTranscriptionService: TranscriptionEngine {
 
         let appleText = await apple.finish(timeout: timeout)
 
-        guard mode == .parakeet else {
+        guard Self.shouldRefineWithParakeet(mode: mode, sampleCount: samples.count),
+              let refined = await parakeet.transcribe(samples, timeout: timeout),
+              !refined.isEmpty
+        else {
             return HybridFinishResult(text: appleText, samples: samples)
         }
+        return HybridFinishResult(text: refined, samples: samples)
+    }
 
-        // Too little audio for Parakeet — keep Apple.
-        guard samples.count >= 3_200 else { // ~0.2s at 16 kHz
-            return HybridFinishResult(text: appleText, samples: samples)
-        }
-
-        if let refined = await parakeet.transcribe(samples, timeout: timeout),
-           !refined.isEmpty
-        {
-            return HybridFinishResult(text: refined, samples: samples)
-        }
-        return HybridFinishResult(text: appleText, samples: samples)
+    /// Too little audio for Parakeet — keep Apple.
+    static func shouldRefineWithParakeet(mode: ASREngineMode, sampleCount: Int) -> Bool {
+        mode == .parakeet && sampleCount >= 3_200 // ~0.2s at 16 kHz
     }
 
     func cancel() async {

@@ -250,8 +250,8 @@ final class VoiceProfileStore {
     private var createdThisSession = Set<UUID>()
     private let url: URL
 
-    init() {
-        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    init(directory: URL? = nil) {
+        let directory = directory ?? URL.applicationSupportDirectory
             .appendingPathComponent("FnDictate", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         url = directory.appendingPathComponent("voices.json")
