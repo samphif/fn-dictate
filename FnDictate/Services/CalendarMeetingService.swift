@@ -124,6 +124,7 @@ final class CalendarMeetingService {
     private func context(from event: EKEvent) -> CalendarMeetingContext {
         let names = (event.attendees ?? [])
             .compactMap { attendee -> String? in
+                if attendee.isCurrentUser { return nil }
                 let name = attendee.name?.trimmingCharacters(in: .whitespacesAndNewlines)
                 if let name, !name.isEmpty { return name }
                 let url = attendee.url.absoluteString

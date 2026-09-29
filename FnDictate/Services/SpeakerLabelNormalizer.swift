@@ -177,9 +177,14 @@ enum SpeakerLabelNormalizer {
         }
 
         // Without acoustic clustering we cannot responsibly keep Voice 1…N as distinct people.
-        // Merge every anonymous label into a single Others bucket (roster/calendar names stay).
+        // Sortformer post-pass uses Speaker N; keep those. Collapse legacy Voice N → Others.
         return segments.map { seg in
             guard isAnonymousVoiceLabel(seg.speaker) else { return seg }
+            // "Speaker N" from Sortformer is intentional — keep until naming maps it.
+            let lower = seg.speaker.lowercased()
+            if lower.hasPrefix("speaker") {
+                return seg
+            }
             var copy = seg
             copy.speaker = "Others"
             return copy

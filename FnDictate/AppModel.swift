@@ -122,6 +122,7 @@ final class AppModel {
     private let correctionWatcher = InAppCorrectionWatcher()
     private let speakerTracker = MeetingSpeakerTracker()
     private let parakeetASR = ParakeetASRClient()
+    private let meetingDiarizer = MeetingDiarizer()
     private var speech: HybridTranscriptionService?
     /// Second analyzer for system-audio channel during meetings (Others).
     private var speechRemote: HybridTranscriptionService?
@@ -255,6 +256,8 @@ final class AppModel {
             } else {
                 parakeetReady = await parakeetASR.isReady
             }
+            // Sortformer download can take a while; kick off in background for post-call naming.
+            Task { await meetingDiarizer.prewarm() }
             await refreshUpcomingBriefIfNeeded()
         }
 
@@ -913,6 +916,7 @@ final class AppModel {
             ?? "Meeting \(Date().formatted(date: .abbreviated, time: .shortened))"
         let attendees = cal?.attendees ?? []
         let oneOnOne = cal?.remoteOneOnOneName
+        speakerTracker.preferredRemoteName = oneOnOne
         remoteSpeakerLabel = oneOnOne ?? "Others"
 
         // Prefer the prompted detection; fall back to a live snapshot for manual starts.
@@ -1069,17 +1073,24 @@ final class AppModel {
 
         var youText = ""
         var othersText = ""
+        var youSamples: [Float] = []
+        var othersSamples: [Float] = []
         if let speech {
-            youText = await speech.finish(timeout: .seconds(45))
+            let finished = await speech.finishWithSamples(timeout: .seconds(45))
+            youText = finished.text
+            youSamples = finished.samples
             await speech.setFinalSegmentHandler(nil)
             await speech.setPartialHandler(nil)
         }
         if includeSystemAudioInMeetings, let remote = speechRemote, remote !== speech {
-            othersText = await remote.finish(timeout: .seconds(45))
+            let finished = await remote.finishWithSamples(timeout: .seconds(45))
+            othersText = finished.text
+            othersSamples = finished.samples
             await remote.setFinalSegmentHandler(nil)
             await remote.setPartialHandler(nil)
         }
-        speakerTracker.end(keepingWeakVoices: true)
+        // Drop one-shot Voice N fingerprints; named profiles are kept.
+        speakerTracker.end(keepingWeakVoices: false)
 
         guard let id = activeMeetingID else {
             phase = .idle
@@ -1102,15 +1113,26 @@ final class AppModel {
             note.participantRoster = liveParticipantRoster
         }
 
+        // Post-call Sortformer pass (Wispr-style): separate remote voices, then name from context.
+        note = await applyPostCallDiarization(
+            note: note,
+            youSamples: youSamples,
+            othersSamples: othersSamples
+        )
+
         let remoteLabel = note.remoteOneOnOneName ?? "Others"
         let rawLabeled: String
         if asrEngineMode == .parakeet, !youText.isEmpty || !othersText.isEmpty {
             // Prefer Parakeet channel transcripts for word accuracy; keep live Apple
-            // segments for speaker-turn UI / voiceprints.
-            var parts: [String] = []
-            if !youText.isEmpty { parts.append("[You] \(youText)") }
-            if !othersText.isEmpty { parts.append("[\(remoteLabel)] \(othersText)") }
-            rawLabeled = parts.joined(separator: "\n")
+            // segments for speaker-turn UI / diarization.
+            if note.segments.isEmpty {
+                var parts: [String] = []
+                if !youText.isEmpty { parts.append("[You] \(youText)") }
+                if !othersText.isEmpty { parts.append("[\(remoteLabel)] \(othersText)") }
+                rawLabeled = parts.joined(separator: "\n")
+            } else {
+                rawLabeled = note.labeledTranscript
+            }
         } else if note.labeledTranscript.isEmpty {
             rawLabeled = [youText, othersText].filter { !$0.isEmpty }.joined(separator: "\n")
         } else {
@@ -1327,6 +1349,63 @@ final class AppModel {
         meetings.upsert(note)
     }
 
+    /// Sortformer post-pass + calendar/roster naming (Wispr: separate live, name after).
+    private func applyPostCallDiarization(
+        note: MeetingNote,
+        youSamples: [Float],
+        othersSamples: [Float]
+    ) async -> MeetingNote {
+        var updated = note
+        guard !updated.segments.isEmpty else { return updated }
+
+        let onlyYouLive = updated.segments.allSatisfy {
+            $0.speaker.caseInsensitiveCompare("You") == .orderedSame
+        }
+        // In-person / shared mic: both people hit the same microphone, so live labels are
+        // all You. Dual-channel only helps when system audio actually has remote speech.
+        let remoteSpeech = MeetingDiarizer.hasMeaningfulSpeech(othersSamples, versusMic: youSamples)
+        let useSharedMic = onlyYouLive || !remoteSpeech
+
+        let samples: [Float]
+        let treatMicAsYou: Bool
+        if useSharedMic {
+            guard !youSamples.isEmpty else { return updated }
+            // Prefer mic; mix in quiet system only if it adds energy (speaker playback).
+            samples = remoteSpeech
+                ? MeetingDiarizer.mix(youSamples, othersSamples)
+                : youSamples
+            treatMicAsYou = false
+        } else {
+            samples = othersSamples.count >= youSamples.count
+                ? othersSamples
+                : MeetingDiarizer.mix(youSamples, othersSamples)
+            treatMicAsYou = true
+        }
+
+        let turns = await meetingDiarizer.diarize(samples)
+        guard !turns.isEmpty else { return updated }
+
+        let distinct = Set(turns.map(\.speakerIndex))
+        // Shared-mic with only one Sortformer slot → nothing to split.
+        if useSharedMic, distinct.count < 2 {
+            return updated
+        }
+
+        let hints = MeetingSpeakerAttribution.Hints(
+            calendarAttendees: updated.attendees,
+            rosterNames: updated.participantRoster,
+            remoteOneOnOneName: updated.remoteOneOnOneName,
+            lockedRenames: updated.lockedSpeakerRenames
+        )
+        updated.segments = MeetingSpeakerAttribution.apply(
+            segments: updated.segments,
+            turns: turns,
+            hints: hints,
+            treatMicrophoneAsYou: treatMicAsYou
+        )
+        return updated
+    }
+
     private func mergeLeftoverMeetingText(
         into note: inout MeetingNote,
         youText: String,
@@ -1488,26 +1567,55 @@ final class AppModel {
     }
 
     private func noteChannelActivity(youLevel: Float?, othersLevel: Float?) {
+        // Wispr-style live chrome: sticky You/Others. Echo makes both channels hot when
+        // remote audio plays through speakers — require a clear louder margin to flip.
         let threshold: Float = 0.12
+        let hold: TimeInterval = 1.2
+        let louderMargin: Float = 0.08
+
         if let youLevel, youLevel >= threshold {
             lastYouSpeechAt = .now
         }
         if let othersLevel, othersLevel >= threshold {
             lastOthersSpeechAt = .now
         }
-        let youRecent = lastYouSpeechAt.map { Date().timeIntervalSince($0) < 0.7 } ?? false
-        let othersRecent = lastOthersSpeechAt.map { Date().timeIntervalSince($0) < 0.7 } ?? false
+
+        let now = Date()
+        let youRecent = lastYouSpeechAt.map { now.timeIntervalSince($0) < hold } ?? false
+        let othersRecent = lastOthersSpeechAt.map { now.timeIntervalSince($0) < hold } ?? false
+        let you = youLevel ?? audioLevel
+        let others = othersLevel ?? remoteAudioLevel
+
+        let next: MeetingChannel?
         if youRecent && othersRecent {
-            // Prefer the louder channel when both are hot.
-            activeMeetingChannel = (youLevel ?? audioLevel) >= (othersLevel ?? remoteAudioLevel)
-                ? .you : .others
+            // Tie / echo: system audio is the source of truth for remote speech.
+            if you >= others + louderMargin {
+                next = .you
+            } else {
+                next = .others
+            }
         } else if youRecent {
-            activeMeetingChannel = .you
+            next = .you
         } else if othersRecent {
-            activeMeetingChannel = .others
-        } else if (youLevel ?? 0) < threshold && (othersLevel ?? 0) < threshold {
-            activeMeetingChannel = nil
+            next = .others
+        } else if you < threshold && others < threshold {
+            next = nil
+        } else {
+            next = activeMeetingChannel
         }
+
+        // Hysteresis: once lit, stay until the other side wins by margin or hold expires.
+        if let current = activeMeetingChannel, let next, current != next {
+            switch (current, next) {
+            case (.you, .others):
+                guard others >= you + louderMargin || !youRecent else { return }
+            case (.others, .you):
+                guard you >= others + louderMargin || !othersRecent else { return }
+            case (.you, .you), (.others, .others):
+                break
+            }
+        }
+        activeMeetingChannel = next
     }
 
     private func startRosterPolling() {

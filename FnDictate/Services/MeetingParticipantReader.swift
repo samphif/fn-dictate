@@ -187,10 +187,26 @@ enum MeetingParticipantReader {
             "microsoft teams", "zoom", "google meet", "invite", "copy link", "settings",
             "microphone", "camera", "video", "audio", "recording", "stop", "start",
             "search", "filter", "close", "minimize", "maximize", "ok", "cancel",
-            "yes", "no", "done", "edit", "delete", "add", "remove", "raise hand"
+            "yes", "no", "done", "edit", "delete", "add", "remove", "raise hand",
+            // Browser / AX chrome (Meet-in-Edge etc.)
+            "edge", "chrome", "safari", "firefox", "brave", "arc",
+            "app bar", "address and search bar", "view site information",
+            "refresh", "back", "forward", "workspaces", "factset profile",
+            "new tab", "tabs", "favorites", "history", "downloads", "extensions",
+            "bookmarks", "reading list", "collections", "profile", "profiles",
+            "window", "windows", "toolbar", "sidebar", "omnibox", "address bar",
+            "reload", "home", "menu", "file", "edit", "view", "help",
+            "share screen", "present now", "turn on captions", "turn off captions",
+            "leave call", "end call", "admit", "deny", "waiting room"
         ]
         if blocked.contains(lower) { return false }
         if lower.hasPrefix("http") { return false }
+        // Phrases that often appear as AX titles for chrome, not people.
+        let blockedSubstrings = [
+            "search bar", "address bar", "site information", "app bar",
+            "new tab", "tab group", "view site"
+        ]
+        if blockedSubstrings.contains(where: { lower.contains($0) }) { return false }
         if trimmed.allSatisfy({ $0.isNumber || $0.isPunctuation || $0.isWhitespace }) {
             return false
         }

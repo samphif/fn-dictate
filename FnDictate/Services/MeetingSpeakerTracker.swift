@@ -33,6 +33,8 @@ final class MeetingSpeakerTracker {
 
     private var recent: [Turn] = []
     private var pendingUserSamples: [PendingUserSample] = []
+    /// Calendar 1:1 display name applied to the remote channel while live.
+    var preferredRemoteName: String?
 
     var lastRemoteLabel: String {
         recent.reversed().first(where: {
@@ -43,6 +45,7 @@ final class MeetingSpeakerTracker {
     func begin() {
         recent.removeAll()
         pendingUserSamples.removeAll()
+        preferredRemoteName = nil
         voices.beginSession()
     }
 
@@ -153,22 +156,38 @@ final class MeetingSpeakerTracker {
         case .microphone:
             return voices.userLabel
         case .system:
+            // Wispr live UX: You vs Others only. Don't invent Voice N mid-call —
+            // post-meeting Sortformer + calendar/roster naming does real separation.
             if voices.matchesUser(embedding) {
                 return voices.userLabel
             }
-            if embedding == nil, let sticky = stickyRemoteLabel(at: offset) {
+            if let embedding, let remembered = voices.matchCommittedRemote(embedding) {
+                return remembered
+            }
+            if let sticky = stickyRemoteLabel(at: offset) {
                 return sticky
             }
-            return voices.labelRemote(embedding: embedding)
+            if let preferred = preferredRemoteName?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !preferred.isEmpty
+            {
+                return VoiceLabel(name: preferred, id: nil, isUser: false)
+            }
+            return voices.othersLabel
         }
     }
 
     private func stickyRemoteLabel(at offset: TimeInterval) -> VoiceLabel? {
-        guard let last = recent.last(where: { $0.channel == .system && $0.voiceID != nil }) else {
+        // Prefer a named/remembered remote; otherwise stick to the last non-You system label.
+        guard let last = recent.last(where: {
+            $0.channel == .system && $0.speaker.caseInsensitiveCompare("You") != .orderedSame
+        }) else {
             return nil
         }
         let gap = offset - last.offset
-        guard gap >= 0, gap < 2.5 else { return nil }
+        guard gap >= 0, gap < 4.0 else { return nil }
+        // Only sticky-reuse when we already have a real identity (not generic Others).
+        guard last.speaker.caseInsensitiveCompare("Others") != .orderedSame else { return nil }
         return VoiceLabel(name: last.speaker, id: last.voiceID, isUser: false)
     }
 

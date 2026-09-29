@@ -3319,7 +3319,7 @@ struct MeetingDetailView: View {
                                 .font(.system(size: 12, weight: .medium))
                             }
                             if note.segments.contains(where: { $0.speaker.caseInsensitiveCompare("You") != .orderedSame }) {
-                                Text("Each other person is kept as their own voice. Click a name to remember them in later meetings.")
+                                Text("Live labels stay You / Others. In person, both voices share the mic — names split after the meeting when Sortformer hears more than one speaker.")
                                     .font(.system(size: 12))
                                     .foregroundStyle(FlowTheme.muted)
                                     .fixedSize(horizontal: false, vertical: true)
