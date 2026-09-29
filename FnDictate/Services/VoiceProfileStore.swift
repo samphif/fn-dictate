@@ -267,6 +267,11 @@ final class VoiceProfileStore {
         VoiceLabel(name: "You", id: nil, isUser: true)
     }
 
+    /// Coarse live remote bucket — Wispr-style Them/Others until post-call naming.
+    var othersLabel: VoiceLabel {
+        VoiceLabel(name: "Others", id: nil, isUser: false)
+    }
+
     /// Names the user actually chose — useful as speech hints, not "Voice 3".
     var rememberedNames: [String] {
         profiles.compactMap { profile in
@@ -312,13 +317,14 @@ final class VoiceProfileStore {
 
     func labelRemote(embedding: [Float]?) -> VoiceLabel {
         guard let embedding else {
-            return VoiceLabel(name: "Others", id: nil, isUser: false)
+            return othersLabel
         }
         if let match = bestRemote(matching: embedding, allowFresh: true) {
             observeRemote(id: match.id, embedding: embedding)
             return VoiceLabel(name: match.name, id: match.id, isUser: false)
         }
-        return createRemote(embedding: embedding)
+        // Do not invent Voice N from a weak spectral miss — stay on Others.
+        return othersLabel
     }
 
     func observeUser(_ embedding: [Float]) {
