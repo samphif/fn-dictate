@@ -34,3 +34,29 @@ targets:
       ENABLE_HARDENED_RUNTIME: YES
       COMBINE_HIDPI_IMAGES: YES
       LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+  FnDictateTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: FnDictateTests
+    dependencies:
+      - target: FnDictate
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.samuelphifer.FnDictateTests
+      GENERATE_INFOPLIST_FILE: YES
+      CODE_SIGN_STYLE: Automatic
+      DEVELOPMENT_TEAM: 9N867BCJ32
+schemes:
+  FnDictate:
+    build:
+      targets:
+        FnDictate: all
+        FnDictateTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - FnDictateTests
+    archive:
+      config: Release

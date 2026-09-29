@@ -44,8 +44,8 @@ enum TranscriptSimilarity {
                 continue
             }
             let prior = kept[index]
-            let incomingIsYou = segment.speaker.caseInsensitiveCompare("You") == .orderedSame
-            let priorIsYou = prior.speaker.caseInsensitiveCompare("You") == .orderedSame
+            let incomingIsYou = segment.role == .you
+            let priorIsYou = prior.role == .you
             var winner = (incomingIsYou != priorIsYou && priorIsYou) ? segment : prior
             let loser = winner.id == segment.id ? prior : segment
             if tokenCount(loser.text) > tokenCount(winner.text) {

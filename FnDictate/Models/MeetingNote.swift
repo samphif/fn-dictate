@@ -1,31 +1,45 @@
 import Foundation
 
+/// The capture stream a meeting segment was transcribed from.
+enum MeetingAudioChannel: String, Codable, Sendable {
+    case microphone
+    case system
+}
+
 struct MeetingTranscriptSegment: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
-    /// Seconds from meeting start.
+    /// Seconds into `channel`'s audio stream; the microphone starts with the meeting.
     var startOffset: TimeInterval
     var text: String
     /// "You", a remembered voice, a calendar attendee, or "Others".
     var speaker: String
     /// Stable id for a remembered other-person voice. Nil for You, Others, and older notes.
     var voiceID: UUID?
+    /// Nil for notes recorded before channels were stored.
+    var channel: MeetingAudioChannel?
 
     init(
         id: UUID = UUID(),
         startOffset: TimeInterval,
         text: String,
         speaker: String,
-        voiceID: UUID? = nil
+        voiceID: UUID? = nil,
+        channel: MeetingAudioChannel? = nil
     ) {
         self.id = id
         self.startOffset = startOffset
         self.text = text
         self.speaker = speaker
         self.voiceID = voiceID
+        self.channel = channel
+    }
+
+    var role: SpeakerRole {
+        SpeakerRole(speaker)
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, startOffset, text, speaker, voiceID
+        case id, startOffset, text, speaker, voiceID, channel
     }
 
     init(from decoder: Decoder) throws {
@@ -35,6 +49,7 @@ struct MeetingTranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         text = try container.decode(String.self, forKey: .text)
         speaker = try container.decode(String.self, forKey: .speaker)
         voiceID = try container.decodeIfPresent(UUID.self, forKey: .voiceID)
+        channel = try container.decodeIfPresent(MeetingAudioChannel.self, forKey: .channel)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -44,6 +59,7 @@ struct MeetingTranscriptSegment: Identifiable, Codable, Equatable, Sendable {
         try container.encode(text, forKey: .text)
         try container.encode(speaker, forKey: .speaker)
         try container.encodeIfPresent(voiceID, forKey: .voiceID)
+        try container.encodeIfPresent(channel, forKey: .channel)
     }
 }
 

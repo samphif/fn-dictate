@@ -6,9 +6,10 @@ final class MicrophoneCapture: @unchecked Sendable {
     private let engine = AVAudioEngine()
     private var isRunning = false
 
-    var onBuffer: ((AVAudioPCMBuffer) -> Void)?
+    /// Called on the audio render thread; must not assume MainActor.
+    var onBuffer: (@Sendable (AVAudioPCMBuffer) -> Void)?
     /// Normalized 0...1 peak level for UI waveform animation.
-    var onLevel: ((Float) -> Void)?
+    var onLevel: (@Sendable (Float) -> Void)?
 
     var inputFormat: AVAudioFormat {
         engine.inputNode.outputFormat(forBus: 0)

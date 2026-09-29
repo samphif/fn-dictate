@@ -1,10 +1,5 @@
 import Foundation
 
-enum MeetingAudioChannel: Sendable {
-    case microphone
-    case system
-}
-
 struct VoiceLabel: Sendable, Equatable {
     var name: String
     var id: UUID?
@@ -247,11 +242,10 @@ struct VoiceProfile: Codable, Identifiable, Equatable, Sendable {
 final class VoiceProfileStore {
     private(set) var profiles: [VoiceProfile] = []
     private var sessionIDs = Set<UUID>()
-    private var createdThisSession = Set<UUID>()
     private let url: URL
 
-    init() {
-        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    init(directory: URL? = nil) {
+        let directory = directory ?? URL.applicationSupportDirectory
             .appendingPathComponent("FnDictate", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         url = directory.appendingPathComponent("voices.json")
@@ -264,7 +258,12 @@ final class VoiceProfileStore {
     }
 
     var userLabel: VoiceLabel {
-        VoiceLabel(name: "You", id: nil, isUser: true)
+        VoiceLabel(name: SpeakerRole.you.label, id: nil, isUser: true)
+    }
+
+    /// Coarse live remote bucket — Wispr-style Them/Others until post-call naming.
+    var othersLabel: VoiceLabel {
+        VoiceLabel(name: SpeakerRole.others.label, id: nil, isUser: false)
     }
 
     /// Names the user actually chose — useful as speech hints, not "Voice 3".
@@ -277,21 +276,10 @@ final class VoiceProfileStore {
 
     func beginSession() {
         sessionIDs.removeAll()
-        createdThisSession.removeAll()
     }
 
-    func endSession(keepingWeakVoices: Bool) {
-        if !keepingWeakVoices {
-            let drop = createdThisSession.filter { id in
-                guard let profile = profiles.first(where: { $0.id == id }) else { return false }
-                return profile.sampleCount < 2 && profile.isGenericName
-            }
-            if !drop.isEmpty {
-                profiles.removeAll { drop.contains($0.id) }
-            }
-        }
+    func endSession() {
         sessionIDs.removeAll()
-        createdThisSession.removeAll()
         save()
     }
 
@@ -305,20 +293,9 @@ final class VoiceProfileStore {
 
     /// A remote voice we already trust: saved from before, or heard earlier in this meeting.
     func matchCommittedRemote(_ embedding: [Float]) -> VoiceLabel? {
-        guard let match = bestRemote(matching: embedding, allowFresh: false) else { return nil }
+        guard let match = bestRemote(matching: embedding) else { return nil }
         observeRemote(id: match.id, embedding: embedding)
         return VoiceLabel(name: match.name, id: match.id, isUser: false)
-    }
-
-    func labelRemote(embedding: [Float]?) -> VoiceLabel {
-        guard let embedding else {
-            return VoiceLabel(name: "Others", id: nil, isUser: false)
-        }
-        if let match = bestRemote(matching: embedding, allowFresh: true) {
-            observeRemote(id: match.id, embedding: embedding)
-            return VoiceLabel(name: match.name, id: match.id, isUser: false)
-        }
-        return createRemote(embedding: embedding)
     }
 
     func observeUser(_ embedding: [Float]) {
@@ -336,9 +313,8 @@ final class VoiceProfileStore {
     func rename(id: UUID, to name: String) -> String? {
         let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty, cleaned.count <= 40 else { return nil }
-        guard cleaned.caseInsensitiveCompare("You") != .orderedSame,
-              cleaned.caseInsensitiveCompare("Others") != .orderedSame
-        else { return nil }
+        let role = SpeakerRole(cleaned)
+        guard role != .you, role != .others else { return nil }
         guard let index = profiles.firstIndex(where: { $0.id == id }), !profiles[index].isUser else {
             return nil
         }
@@ -361,50 +337,18 @@ final class VoiceProfileStore {
         save()
     }
 
-    private func bestRemote(matching embedding: [Float], allowFresh: Bool) -> VoiceProfile? {
+    private func bestRemote(matching embedding: [Float]) -> VoiceProfile? {
         var best: VoiceProfile?
         var bestScore: Float = 0
         for profile in profiles where !profile.isUser {
             let score = Voiceprint.cosine(profile.embedding, embedding)
-            let threshold: Float
-            if sessionIDs.contains(profile.id) {
-                threshold = 0.76
-            } else if allowFresh {
-                threshold = 0.80
-            } else {
-                // Relabeling a line already tagged You needs a voice we've actually learned.
-                threshold = createdThisSession.contains(profile.id) && profile.sampleCount < 2 ? 1.1 : 0.80
-            }
+            // Voices already heard this meeting match a little more loosely.
+            let threshold: Float = sessionIDs.contains(profile.id) ? 0.76 : 0.80
             guard score >= threshold, score > bestScore else { continue }
             best = profile
             bestScore = score
         }
         return best
-    }
-
-    private func createRemote(embedding: [Float]) -> VoiceLabel {
-        let profile = VoiceProfile(
-            id: UUID(),
-            name: nextGenericName(),
-            embedding: embedding,
-            sampleCount: 1,
-            isUser: false,
-            updatedAt: .now
-        )
-        profiles.append(profile)
-        sessionIDs.insert(profile.id)
-        createdThisSession.insert(profile.id)
-        save()
-        return VoiceLabel(name: profile.name, id: profile.id, isUser: false)
-    }
-
-    private func nextGenericName() -> String {
-        let used = Set(profiles.map(\.name))
-        var number = 1
-        while used.contains("Voice \(number)") {
-            number += 1
-        }
-        return "Voice \(number)"
     }
 
     @discardableResult

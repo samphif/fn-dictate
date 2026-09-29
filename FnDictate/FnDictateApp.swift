@@ -8,7 +8,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Captured for SwiftUI-managed windows (e.g. Setup).
     var openWindow: OpenWindowAction?
 
+    /// Unit tests are hosted in the app; skip hotkeys, permission prompts, and model downloads.
+    private let isHostingTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !isHostingTests else { return }
         // Regular policy → Dock + Cmd+Tab. Menu bar extra still works.
         NSApp.setActivationPolicy(.regular)
         model.presentOnboardingHandler = { [weak self] in
@@ -19,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// TCC grants often only stick after Settings → return (or a full relaunch).
     func applicationDidBecomeActive(_ notification: Notification) {
+        guard !isHostingTests else { return }
         model.permissions.refresh()
         if model.permissions.allRequiredGranted {
             model.completeSetup()

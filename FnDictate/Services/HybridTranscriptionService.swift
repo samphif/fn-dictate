@@ -2,6 +2,16 @@ import AVFoundation
 import FluidAudio
 import Foundation
 
+/// Result of finishing a hybrid session: transcript, 16 kHz mono PCM for diarization, and
+/// Parakeet word timings (empty when Apple's transcript was kept).
+struct HybridFinishResult: Sendable {
+    var text: String
+    var samples: [Float]
+    var words: [TimedWord] = []
+
+    static let empty = HybridFinishResult(text: "", samples: [])
+}
+
 /// Apple Speech for live partials/segments + Parakeet v2 batch on the buffered PCM at finish.
 @available(macOS 26, *)
 actor HybridTranscriptionService: TranscriptionEngine {
@@ -46,26 +56,28 @@ actor HybridTranscriptionService: TranscriptionEngine {
     }
 
     func finish(timeout: Duration = .seconds(3)) async -> String {
+        let result = await finishWithSamples(timeout: timeout)
+        return result.text
+    }
+
+    /// Finalize ASR and return the buffered 16 kHz mono PCM for post-call diarization.
+    func finishWithSamples(timeout: Duration = .seconds(3)) async -> HybridFinishResult {
         let samples = pcmSamples
         pcmSamples.removeAll(keepingCapacity: true)
 
         let appleText = await apple.finish(timeout: timeout)
 
-        guard mode == .parakeet else {
-            return appleText
+        guard Self.shouldRefineWithParakeet(mode: mode, sampleCount: samples.count),
+              let refined = await parakeet.transcribe(samples, timeout: timeout)
+        else {
+            return HybridFinishResult(text: appleText, samples: samples)
         }
+        return HybridFinishResult(text: refined.text, samples: samples, words: refined.words)
+    }
 
-        // Too little audio for Parakeet — keep Apple.
-        guard samples.count >= 3_200 else { // ~0.2s at 16 kHz
-            return appleText
-        }
-
-        if let refined = await parakeet.transcribe(samples, timeout: timeout),
-           !refined.isEmpty
-        {
-            return refined
-        }
-        return appleText
+    /// Too little audio for Parakeet — keep Apple.
+    static func shouldRefineWithParakeet(mode: ASREngineMode, sampleCount: Int) -> Bool {
+        mode == .parakeet && sampleCount >= 3_200 // ~0.2s at 16 kHz
     }
 
     func cancel() async {

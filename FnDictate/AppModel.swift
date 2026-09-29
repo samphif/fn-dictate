@@ -26,10 +26,7 @@ final class AppModel {
     /// Display label for the remote channel ("Others" or calendar 1:1 name).
     var remoteSpeakerLabel = "Others"
 
-    enum MeetingChannel: Equatable, Sendable {
-        case you
-        case others
-    }
+    typealias MeetingChannel = MeetingChannelActivity.Channel
 
     var statusMessage = "Hold Fn · double-tap hands-free"
     enum LibraryTab: Equatable {
@@ -122,6 +119,7 @@ final class AppModel {
     private let correctionWatcher = InAppCorrectionWatcher()
     private let speakerTracker = MeetingSpeakerTracker()
     private let parakeetASR = ParakeetASRClient()
+    private let meetingDiarizer = MeetingDiarizer()
     private var speech: HybridTranscriptionService?
     /// Second analyzer for system-audio channel during meetings (Others).
     private var speechRemote: HybridTranscriptionService?
@@ -150,9 +148,7 @@ final class AppModel {
     private var meetingRefineTasks: [UUID: Task<Void, Never>] = [:]
     /// Polls Accessibility for participant tiles during an active meeting.
     private var rosterPollTask: Task<Void, Never>?
-    /// Decay remote level when buffers pause.
-    private var lastYouSpeechAt: Date?
-    private var lastOthersSpeechAt: Date?
+    @ObservationIgnored private var channelActivity = MeetingChannelActivity()
     /// Bumps when stop/retry supersedes an in-flight refine so a late result can't overwrite it.
     private var meetingRefineGeneration: [UUID: UUID] = [:]
 
@@ -255,6 +251,8 @@ final class AppModel {
             } else {
                 parakeetReady = await parakeetASR.isReady
             }
+            // Sortformer download can take a while; kick off in background for post-call naming.
+            Task { await meetingDiarizer.prewarm() }
             await refreshUpcomingBriefIfNeeded()
         }
 
@@ -905,7 +903,7 @@ final class AppModel {
         activeMeetingPartialOthers = ""
         activeMeetingSystemAudioFailed = false
         remoteAudioLevel = 0
-        activeMeetingChannel = nil
+        resetChannelActivity()
         liveParticipantRoster = []
         meetingStartedAt = .now
         speakerTracker.begin()
@@ -916,6 +914,7 @@ final class AppModel {
             ?? "Meeting \(Date().formatted(date: .abbreviated, time: .shortened))"
         let attendees = cal?.attendees ?? []
         let oneOnOne = cal?.remoteOneOnOneName
+        speakerTracker.preferredRemoteName = oneOnOne
         remoteSpeakerLabel = oneOnOne ?? "Others"
 
         // Prefer the prompted detection; fall back to a live snapshot for manual starts.
@@ -981,7 +980,7 @@ final class AppModel {
             mic.onLevel = { [weak self] level in
                 Task { @MainActor in
                     self?.audioLevel = level
-                    self?.noteChannelActivity(youLevel: level, othersLevel: nil)
+                    self?.noteChannelLevels()
                 }
             }
             try mic.start()
@@ -1023,7 +1022,7 @@ final class AppModel {
                     capture.onLevel = { [weak self] level in
                         Task { @MainActor in
                             self?.remoteAudioLevel = level
-                            self?.noteChannelActivity(youLevel: nil, othersLevel: level)
+                            self?.noteChannelLevels()
                         }
                     }
                     do {
@@ -1062,7 +1061,7 @@ final class AppModel {
         mic.stop()
         audioLevel = 0
         remoteAudioLevel = 0
-        activeMeetingChannel = nil
+        resetChannelActivity()
         let capture = systemAudio
         systemAudio = nil
         if let capture {
@@ -1070,19 +1069,12 @@ final class AppModel {
         }
         showListeningPill(false)
 
-        var youText = ""
-        var othersText = ""
-        if let speech {
-            youText = await speech.finish(timeout: .seconds(45))
-            await speech.setFinalSegmentHandler(nil)
-            await speech.setPartialHandler(nil)
-        }
-        if includeSystemAudioInMeetings, let remote = speechRemote, remote !== speech {
-            othersText = await remote.finish(timeout: .seconds(45))
-            await remote.setFinalSegmentHandler(nil)
-            await remote.setPartialHandler(nil)
-        }
-        speakerTracker.end(keepingWeakVoices: true)
+        let micSession = speech
+        let systemSession = includeSystemAudioInMeetings && speechRemote !== speech ? speechRemote : nil
+        async let micFinish = Self.finishMeetingChannel(micSession)
+        async let systemFinish = Self.finishMeetingChannel(systemSession)
+        let (mic, system) = await (micFinish, systemFinish)
+        speakerTracker.end()
 
         guard let id = activeMeetingID else {
             phase = .idle
@@ -1092,37 +1084,20 @@ final class AppModel {
 
         var note = meetings.notes.first(where: { $0.id == id }) ?? MeetingNote(id: id)
         note.systemAudioCaptureFailed = note.systemAudioCaptureFailed || activeMeetingSystemAudioFailed
-        // Fold leftover finish() text using the live remote label (1:1 name or Others).
-        mergeLeftoverMeetingText(
-            into: &note,
-            youText: youText,
-            othersText: othersText,
-            remoteSpeaker: note.remoteOneOnOneName ?? "Others"
-        )
-
-        // Snapshot latest roster onto the note before refine.
+        // Snapshot latest roster onto the note before naming speakers.
         if !liveParticipantRoster.isEmpty {
             note.participantRoster = liveParticipantRoster
         }
-
-        let remoteLabel = note.remoteOneOnOneName ?? "Others"
-        let rawLabeled: String
-        if asrEngineMode == .parakeet, !youText.isEmpty || !othersText.isEmpty {
-            // Prefer Parakeet channel transcripts for word accuracy; keep live Apple
-            // segments for speaker-turn UI / voiceprints.
-            var parts: [String] = []
-            if !youText.isEmpty { parts.append("[You] \(youText)") }
-            if !othersText.isEmpty { parts.append("[\(remoteLabel)] \(othersText)") }
-            rawLabeled = parts.joined(separator: "\n")
-        } else if note.labeledTranscript.isEmpty {
-            rawLabeled = [youText, othersText].filter { !$0.isEmpty }.joined(separator: "\n")
-        } else {
-            rawLabeled = note.labeledTranscript
-        }
-        let withDictionary = dictionary.apply(to: rawLabeled)
+        note = await MeetingFinalizer.finalize(
+            note,
+            mic: mic,
+            system: system,
+            diarizer: meetingDiarizer,
+            applyDictionary: { dictionary.apply(to: $0) }
+        )
 
         note.endedAt = .now
-        note.transcript = withDictionary
+        note.transcript = dictionary.apply(to: note.labeledTranscript)
         note.processingState = .processing
         note.processingMessage = "Generating summary, action items, and speakers…"
         meetings.upsert(note)
@@ -1330,44 +1305,13 @@ final class AppModel {
         meetings.upsert(note)
     }
 
-    private func mergeLeftoverMeetingText(
-        into note: inout MeetingNote,
-        youText: String,
-        othersText: String,
-        remoteSpeaker: String = "Others"
-    ) {
-        if note.segments.isEmpty {
-            var segs: [MeetingTranscriptSegment] = []
-            if !youText.isEmpty {
-                segs.append(MeetingTranscriptSegment(startOffset: 0, text: youText, speaker: "You"))
-            }
-            if !othersText.isEmpty {
-                segs.append(
-                    MeetingTranscriptSegment(startOffset: 0.1, text: othersText, speaker: remoteSpeaker)
-                )
-            }
-            note.segments = segs
-            return
-        }
-
-        // If the remote channel never emitted segments, fold finish() text in.
-        if !othersText.isEmpty {
-            let othersJoined = note.segments
-                .filter { $0.speaker != "You" }
-                .map(\.text)
-                .joined(separator: " ")
-            if othersJoined.isEmpty {
-                let lastOffset = note.segments.map(\.startOffset).max() ?? 0
-                note.segments.append(
-                    MeetingTranscriptSegment(
-                        startOffset: lastOffset + 0.1,
-                        text: dictionary.apply(to: othersText),
-                        speaker: remoteSpeaker
-                    )
-                )
-            }
-        }
-        _ = youText
+    /// Finalize one channel's ASR (Parakeet refine included) and detach its live handlers.
+    private static func finishMeetingChannel(_ session: HybridTranscriptionService?) async -> HybridFinishResult {
+        guard let session else { return .empty }
+        let finished = await session.finishWithSamples(timeout: .seconds(45))
+        await session.setFinalSegmentHandler(nil)
+        await session.setPartialHandler(nil)
+        return finished
     }
 
     private func cancelMeetingRecording() async {
@@ -1375,7 +1319,7 @@ final class AppModel {
         mic.stop()
         audioLevel = 0
         remoteAudioLevel = 0
-        activeMeetingChannel = nil
+        resetChannelActivity()
         let capture = systemAudio
         systemAudio = nil
         if let capture {
@@ -1392,7 +1336,7 @@ final class AppModel {
             await remote.setPartialHandler(nil)
         }
         showListeningPill(false)
-        speakerTracker.end(keepingWeakVoices: false)
+        speakerTracker.end()
         if let id = activeMeetingID {
             if let note = meetings.notes.first(where: { $0.id == id }),
                note.segments.isEmpty,
@@ -1442,15 +1386,15 @@ final class AppModel {
                 voiceID: voiceID
             )
         }
-        if channel == .microphone {
+        switch channel {
+        case .microphone:
             activeMeetingPartialYou = ""
-            lastYouSpeechAt = .now
-            activeMeetingChannel = .you
-        } else {
+            channelActivity.heardLine(from: .you, at: .now)
+        case .system:
             activeMeetingPartialOthers = ""
-            lastOthersSpeechAt = .now
-            activeMeetingChannel = .others
+            channelActivity.heardLine(from: .others, at: .now)
         }
+        activeMeetingChannel = channelActivity.active
         refreshMeetingPartialDisplay()
     }
 
@@ -1490,27 +1434,14 @@ final class AppModel {
         }
     }
 
-    private func noteChannelActivity(youLevel: Float?, othersLevel: Float?) {
-        let threshold: Float = 0.12
-        if let youLevel, youLevel >= threshold {
-            lastYouSpeechAt = .now
-        }
-        if let othersLevel, othersLevel >= threshold {
-            lastOthersSpeechAt = .now
-        }
-        let youRecent = lastYouSpeechAt.map { Date().timeIntervalSince($0) < 0.7 } ?? false
-        let othersRecent = lastOthersSpeechAt.map { Date().timeIntervalSince($0) < 0.7 } ?? false
-        if youRecent && othersRecent {
-            // Prefer the louder channel when both are hot.
-            activeMeetingChannel = (youLevel ?? audioLevel) >= (othersLevel ?? remoteAudioLevel)
-                ? .you : .others
-        } else if youRecent {
-            activeMeetingChannel = .you
-        } else if othersRecent {
-            activeMeetingChannel = .others
-        } else if (youLevel ?? 0) < threshold && (othersLevel ?? 0) < threshold {
-            activeMeetingChannel = nil
-        }
+    private func noteChannelLevels() {
+        channelActivity.levelsChanged(you: audioLevel, others: remoteAudioLevel, at: .now)
+        activeMeetingChannel = channelActivity.active
+    }
+
+    private func resetChannelActivity() {
+        channelActivity.reset()
+        activeMeetingChannel = nil
     }
 
     private func startRosterPolling() {
@@ -1741,7 +1672,7 @@ final class AppModel {
 
     /// Move idle / listening rails onto the screen that owns the frontmost target app.
     private func relocateOverlaysToEditingScreenIfNeeded() {
-        let screen = preferredOverlayScreen()
+        guard let screen = preferredOverlayScreen() else { return }
         let screenID = ObjectIdentifier(screen)
         guard screenID != lastOverlayScreenID else { return }
         lastOverlayScreenID = screenID
@@ -1781,14 +1712,15 @@ final class AppModel {
             let panel = makeFloatingPanel(size: size, level: .floating)
             panel.contentViewController = ClearHostingController(rootView: ListeningPillView(model: self))
             listeningPill = panel
-            placePanel(panel, size: size, on: preferredOverlayScreen(), edge: .trailing, inset: 4)
+            if let screen = preferredOverlayScreen() {
+                placePanel(panel, size: size, on: screen, edge: .trailing, inset: 4)
+            }
         }
         // Observation keeps ListeningPillView in sync — don't reset rootView (kills animation state).
 
         guard let panel = listeningPill else { return }
 
-        if repositionToEditingScreen {
-            let screen = preferredOverlayScreen()
+        if repositionToEditingScreen, let screen = preferredOverlayScreen() {
             lastOverlayScreenID = ObjectIdentifier(screen)
             placePanel(panel, size: size, on: screen, edge: .trailing, inset: 4)
         } else {
@@ -1831,17 +1763,17 @@ final class AppModel {
             let panel = makeFloatingPanel(size: size, level: .statusBar)
             panel.contentViewController = ClearHostingController(rootView: MeetingPromptView(model: self))
             meetingPromptPanel = panel
-            let screen = preferredOverlayScreen()
-            lastOverlayScreenID = ObjectIdentifier(screen)
-            placePanel(panel, size: size, on: screen, edge: .trailing, inset: 0)
+            if let screen = preferredOverlayScreen() {
+                lastOverlayScreenID = ObjectIdentifier(screen)
+                placePanel(panel, size: size, on: screen, edge: .trailing, inset: 0)
+            }
         }
         // Observation keeps MeetingPromptView in sync — don't reset rootView (kills hover / animation).
 
         guard let panel = meetingPromptPanel else { return }
 
         let newFrame: NSRect
-        if repositionToEditingScreen {
-            let screen = preferredOverlayScreen()
+        if repositionToEditingScreen, let screen = preferredOverlayScreen() {
             lastOverlayScreenID = ObjectIdentifier(screen)
             newFrame = trailingFrame(size: size, on: screen, inset: 0)
         } else {
@@ -1903,7 +1835,8 @@ final class AppModel {
     }
 
     /// Screen the user is actively editing on (frontmost app window / mouse), not always main.
-    private func preferredOverlayScreen() -> NSScreen {
+    /// Nil while no display is attached (clamshell sleep, display reconfiguration).
+    private func preferredOverlayScreen() -> NSScreen? {
         if let screen = screenContainingFrontmostAppWindow() {
             return screen
         }
@@ -1911,7 +1844,7 @@ final class AppModel {
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) {
             return screen
         }
-        return NSScreen.main ?? NSScreen.screens.first!
+        return NSScreen.main ?? NSScreen.screens.first
     }
 
     private func screenContainingFrontmostAppWindow() -> NSScreen? {

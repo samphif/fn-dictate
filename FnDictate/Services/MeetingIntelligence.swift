@@ -409,7 +409,7 @@ struct MeetingIntelligence: Sendable {
 
         Rules:
         - Keep [You] for the local participant.
-        - Keep existing [Voice N] / person-name labels when they already identify a voice; do not freely rename them.
+        - Keep existing person-name and [Speaker N] labels from acoustic diarization; do not freely rename them.
         - Relabel [Others] (or mislabeled lines) to a real known name when the transcript strongly implies who spoke; otherwise keep [Others] or [You].
         - NEVER invent new Voice N / Speaker N labels. Prefer merging uncertain remote speech under [Others] over inventing anonymous voices.
         - Use one canonical spelling per person (match Known attendees / participants; never emit casing duplicates). Merge obvious casing duplicates.
@@ -535,7 +535,7 @@ struct MeetingIntelligence: Sendable {
         let speakers = Set(segments.map(\.speaker))
         let onlyYou = speakers.count == 1 && speakers.contains("You")
         let hasOthers = speakers.contains("Others")
-        let hasAnonymous = speakers.contains { SpeakerLabelNormalizer.isAnonymousVoiceLabel($0) }
+        let hasAnonymous = speakers.contains { SpeakerRole($0).isAnonymous }
         // Relabel when we have known names and coarse / over-split labels.
         guard !known.isEmpty, onlyYou || hasOthers || hasAnonymous else {
             return []
@@ -551,7 +551,7 @@ struct MeetingIntelligence: Sendable {
             Known attendees / participants (use these spellings only): \(known.joined(separator: ", "))
             Rules:
             - Keep [You] when the local participant is speaking (first person about their own actions is a hint, not a rule).
-            - Keep existing [Voice N] / person-name labels; do not freely rename identified voices.
+            - Keep existing person-name and [Speaker N] labels from acoustic diarization; do not freely rename identified voices.
             - Replace [Others] with a known name when the content strongly implies who spoke; otherwise keep [Others].
             - Merge casing duplicates of the same person. Never invent new Voice/Speaker numbers; map uncertain anonymous labels to a known name when clear, otherwise [Others].
             - Prefer fewer speaker labels over more. Do not over-split.
