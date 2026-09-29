@@ -6,9 +6,10 @@ import ScreenCaptureKit
 /// Captures system audio via ScreenCaptureKit when Screen Recording is granted.
 final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private var stream: SCStream?
-    var onBuffer: ((AVAudioPCMBuffer) -> Void)?
+    /// Called on the ScreenCaptureKit sample queue; must not assume MainActor.
+    var onBuffer: (@Sendable (AVAudioPCMBuffer) -> Void)?
     /// Normalized 0...1 peak level for remote (Others) UI waveform.
-    var onLevel: ((Float) -> Void)?
+    var onLevel: (@Sendable (Float) -> Void)?
 
     func start() async throws {
         let content: SCShareableContent
