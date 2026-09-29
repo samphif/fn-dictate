@@ -1831,7 +1831,7 @@ final class AppModel {
 
     /// Move idle / listening rails onto the screen that owns the frontmost target app.
     private func relocateOverlaysToEditingScreenIfNeeded() {
-        let screen = preferredOverlayScreen()
+        guard let screen = preferredOverlayScreen() else { return }
         let screenID = ObjectIdentifier(screen)
         guard screenID != lastOverlayScreenID else { return }
         lastOverlayScreenID = screenID
@@ -1871,14 +1871,15 @@ final class AppModel {
             let panel = makeFloatingPanel(size: size, level: .floating)
             panel.contentViewController = ClearHostingController(rootView: ListeningPillView(model: self))
             listeningPill = panel
-            placePanel(panel, size: size, on: preferredOverlayScreen(), edge: .trailing, inset: 4)
+            if let screen = preferredOverlayScreen() {
+                placePanel(panel, size: size, on: screen, edge: .trailing, inset: 4)
+            }
         }
         // Observation keeps ListeningPillView in sync — don't reset rootView (kills animation state).
 
         guard let panel = listeningPill else { return }
 
-        if repositionToEditingScreen {
-            let screen = preferredOverlayScreen()
+        if repositionToEditingScreen, let screen = preferredOverlayScreen() {
             lastOverlayScreenID = ObjectIdentifier(screen)
             placePanel(panel, size: size, on: screen, edge: .trailing, inset: 4)
         } else {
@@ -1921,17 +1922,17 @@ final class AppModel {
             let panel = makeFloatingPanel(size: size, level: .statusBar)
             panel.contentViewController = ClearHostingController(rootView: MeetingPromptView(model: self))
             meetingPromptPanel = panel
-            let screen = preferredOverlayScreen()
-            lastOverlayScreenID = ObjectIdentifier(screen)
-            placePanel(panel, size: size, on: screen, edge: .trailing, inset: 0)
+            if let screen = preferredOverlayScreen() {
+                lastOverlayScreenID = ObjectIdentifier(screen)
+                placePanel(panel, size: size, on: screen, edge: .trailing, inset: 0)
+            }
         }
         // Observation keeps MeetingPromptView in sync — don't reset rootView (kills hover / animation).
 
         guard let panel = meetingPromptPanel else { return }
 
         let newFrame: NSRect
-        if repositionToEditingScreen {
-            let screen = preferredOverlayScreen()
+        if repositionToEditingScreen, let screen = preferredOverlayScreen() {
             lastOverlayScreenID = ObjectIdentifier(screen)
             newFrame = trailingFrame(size: size, on: screen, inset: 0)
         } else {
@@ -1993,7 +1994,8 @@ final class AppModel {
     }
 
     /// Screen the user is actively editing on (frontmost app window / mouse), not always main.
-    private func preferredOverlayScreen() -> NSScreen {
+    /// Nil while no display is attached (clamshell sleep, display reconfiguration).
+    private func preferredOverlayScreen() -> NSScreen? {
         if let screen = screenContainingFrontmostAppWindow() {
             return screen
         }
@@ -2001,7 +2003,7 @@ final class AppModel {
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) {
             return screen
         }
-        return NSScreen.main ?? NSScreen.screens.first!
+        return NSScreen.main ?? NSScreen.screens.first
     }
 
     private func screenContainingFrontmostAppWindow() -> NSScreen? {

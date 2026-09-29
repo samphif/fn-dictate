@@ -12,7 +12,7 @@ final class ProjectStore {
     private let seededKey = "FnDictate.didSeedDefaultProjects"
 
     init() {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = URL.applicationSupportDirectory
             .appendingPathComponent("FnDictate", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         url = dir.appendingPathComponent("projects.json")
@@ -109,7 +109,7 @@ final class ProjectStore {
 
     /// Reads the on-disk catalog. Used by the agent export, which does not hold this store.
     nonisolated static func loadSnapshot() -> [MeetingProject] {
-        let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let url = URL.applicationSupportDirectory
             .appendingPathComponent("FnDictate", isDirectory: true)
             .appendingPathComponent("projects.json")
         guard let data = try? Data(contentsOf: url) else { return [] }
