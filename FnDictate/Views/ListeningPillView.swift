@@ -217,32 +217,84 @@ struct VoiceWaveformView: View {
     let isActive: Bool
     let tint: Color
 
+    /// Avoid `TimelineView(.animation)` — on macOS 26+ its update path can crash in
+    /// `swift_task_isMainExecutorImpl` during NSHostingView layout. Drive motion via
+    /// Shape `animatableData` instead.
+    @State private var phase: CGFloat = 0
+
     private let barCount = 5
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isActive)) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate
-            HStack(alignment: .center, spacing: 3) {
-                ForEach(0..<barCount, id: \.self) { index in
-                    Capsule(style: .continuous)
-                        .fill(tint.opacity(isActive ? 0.95 : 0.35))
-                        .frame(width: 4, height: barHeight(index: index, time: t))
-                }
+        VoiceWaveformShape(
+            phase: phase,
+            level: CGFloat(level),
+            isActive: isActive,
+            barCount: barCount
+        )
+        .fill(tint.opacity(isActive ? 0.95 : 0.35))
+        .onAppear { syncAnimation() }
+        .onChange(of: isActive) { _, _ in syncAnimation() }
+    }
+
+    private func syncAnimation() {
+        // `phase` is treated as elapsed seconds so bar math matches the old TimelineView.
+        if isActive {
+            phase = 0
+            withAnimation(.linear(duration: 120).repeatForever(autoreverses: false)) {
+                phase = 120
             }
-            .frame(maxHeight: .infinity, alignment: .center)
+        } else {
+            withAnimation(.easeOut(duration: 0.15)) {
+                phase = 0
+            }
+        }
+    }
+}
+
+/// Vertical bars — heights encoded in a Path so SwiftUI can interpolate `phase` without TimelineView.
+/// `level` is in `animatableData` so it keeps updating while `phase` is mid-animation (plain
+/// Shape properties can otherwise freeze for the life of the transaction).
+private struct VoiceWaveformShape: Shape {
+    var phase: CGFloat
+    var level: CGFloat
+    var isActive: Bool
+    var barCount: Int
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(phase, level) }
+        set {
+            phase = newValue.first
+            level = newValue.second
         }
     }
 
-    private func barHeight(index: Int, time: TimeInterval) -> CGFloat {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let spacing: CGFloat = 3
+        let barWidth: CGFloat = 4
+        let totalWidth = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * spacing
+        let originX = (rect.width - totalWidth) / 2
         let base: CGFloat = 6
-        let maxExtra: CGFloat = 28
-        guard isActive else { return base }
+        let maxExtra: CGFloat = min(28, max(0, rect.height - base))
+        let speech = max(0.05, min(1, level))
 
-        let phase = Double(index) * 0.85
-        let wobble = (sin(time * (9.0 + Double(index) * 1.7) + phase) + 1) / 2
-        let speech = CGFloat(max(0.05, min(1, level)))
-        let height = base + maxExtra * (0.25 * CGFloat(wobble) + 0.75 * speech * CGFloat(0.55 + 0.45 * wobble))
-        return height
+        for index in 0..<barCount {
+            let height: CGFloat
+            if isActive {
+                let barPhase = CGFloat(index) * 0.85
+                let wobble = (sin(phase * (9.0 + CGFloat(index) * 1.7) + barPhase) + 1) / 2
+                height = base + maxExtra * (0.25 * wobble + 0.75 * speech * (0.55 + 0.45 * wobble))
+            } else {
+                height = base
+            }
+            let x = originX + CGFloat(index) * (barWidth + spacing)
+            let y = (rect.height - height) / 2
+            path.addRoundedRect(
+                in: CGRect(x: x, y: y, width: barWidth, height: height),
+                cornerSize: CGSize(width: barWidth / 2, height: barWidth / 2)
+            )
+        }
+        return path
     }
 }
 
@@ -252,37 +304,81 @@ struct SideWaveformView: View {
     let isActive: Bool
     let tint: Color
 
+    /// Same TimelineView crash avoidance as `VoiceWaveformView`.
+    @State private var phase: CGFloat = 0
+
     private let barCount = 11
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isActive)) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate
-            VStack(alignment: .center, spacing: 2.5) {
-                ForEach(0..<barCount, id: \.self) { index in
-                    Capsule(style: .continuous)
-                        .fill(tint.opacity(isActive ? 0.95 : 0.35))
-                        .frame(width: barWidth(index: index, time: t), height: 2.5)
-                }
+        SideWaveformShape(
+            phase: phase,
+            level: CGFloat(level),
+            isActive: isActive,
+            barCount: barCount
+        )
+        .fill(tint.opacity(isActive ? 0.95 : 0.35))
+        .onAppear { syncAnimation() }
+        .onChange(of: isActive) { _, _ in syncAnimation() }
+    }
+
+    private func syncAnimation() {
+        if isActive {
+            phase = 0
+            withAnimation(.linear(duration: 120).repeatForever(autoreverses: false)) {
+                phase = 120
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        } else {
+            withAnimation(.easeOut(duration: 0.15)) {
+                phase = 0
+            }
+        }
+    }
+}
+
+private struct SideWaveformShape: Shape {
+    var phase: CGFloat
+    var level: CGFloat
+    var isActive: Bool
+    var barCount: Int
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(phase, level) }
+        set {
+            phase = newValue.first
+            level = newValue.second
         }
     }
 
-    private func barWidth(index: Int, time: TimeInterval) -> CGFloat {
-        let mid = Double(barCount - 1) / 2
-        // Diamond envelope — longest in the middle, short at the ends.
-        let envelope = 1 - abs(Double(index) - mid) / mid
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let spacing: CGFloat = 2.5
+        let barHeight: CGFloat = 2.5
+        let totalHeight = CGFloat(barCount) * barHeight + CGFloat(barCount - 1) * spacing
+        let originY = (rect.height - totalHeight) / 2
+        let mid = CGFloat(barCount - 1) / 2
         let base: CGFloat = 4
-        let maxExtra: CGFloat = 16
-        guard isActive else {
-            return base + maxExtra * CGFloat(envelope) * 0.45
-        }
+        let maxExtra: CGFloat = min(16, max(0, rect.width - base))
+        let speech = max(0.08, min(1, level))
 
-        let phase = Double(index) * 0.55
-        let wobble = (sin(time * (10.0 + Double(index) * 0.9) + phase) + 1) / 2
-        let speech = CGFloat(max(0.08, min(1, level)))
-        let pulse = 0.3 * CGFloat(wobble) + 0.7 * speech * CGFloat(0.5 + 0.5 * wobble)
-        return base + maxExtra * CGFloat(envelope) * (0.35 + 0.65 * pulse)
+        for index in 0..<barCount {
+            let envelope = 1 - abs(CGFloat(index) - mid) / mid
+            let width: CGFloat
+            if isActive {
+                let barPhase = CGFloat(index) * 0.55
+                let wobble = (sin(phase * (10.0 + CGFloat(index) * 0.9) + barPhase) + 1) / 2
+                let pulse = 0.3 * wobble + 0.7 * speech * (0.5 + 0.5 * wobble)
+                width = base + maxExtra * envelope * (0.35 + 0.65 * pulse)
+            } else {
+                width = base + maxExtra * envelope * 0.45
+            }
+            let x = (rect.width - width) / 2
+            let y = originY + CGFloat(index) * (barHeight + spacing)
+            path.addRoundedRect(
+                in: CGRect(x: x, y: y, width: width, height: barHeight),
+                cornerSize: CGSize(width: barHeight / 2, height: barHeight / 2)
+            )
+        }
+        return path
     }
 }
 
