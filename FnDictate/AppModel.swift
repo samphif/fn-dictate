@@ -68,8 +68,6 @@ final class AppModel {
     var flowSidebarExpanded = false
     /// Meeting prompt tucked into the rail (Not now still snoozes fully).
     var meetingPromptMinimized = false
-    /// Listening/meeting transcript pill (legacy collapse flag; rail is always compact now).
-    var listeningPillCollapsed = false
     /// Live catch-up answer shown during / after a meeting.
     var meetingCatchUp: String?
     /// Answer from ask-across-history.
@@ -129,6 +127,11 @@ final class AppModel {
     private var systemAudio: SystemAudioCapture?
     private var listeningPill: NSPanel?
     private var meetingPromptPanel: NSPanel?
+    /// Collapse fades the capsules before the panel rect shrinks, so a pending
+    /// resize must be cancellable if the rail expands again or capture takes over.
+    @ObservationIgnored private var flowSidebarResizeTask: Task<Void, Never>?
+    /// While set, the panel keeps this size so a fade isn't cropped by the collapsed rect.
+    @ObservationIgnored private var flowSidebarPinnedSize: CGSize?
     /// Follows frontmost-app screen changes so the idle edge tab moves with focus.
     @ObservationIgnored private var overlayScreenObserver: NSObjectProtocol?
     /// Last screen we docked overlays onto (avoid redundant moves).
@@ -483,7 +486,8 @@ final class AppModel {
         showMeetingPrompt = true
         meetingPromptMinimized = false
         flowSidebarExpanded = false
-        updateFlowSidebarPanel(repositionToEditingScreen: true)
+        flowSidebarPinnedSize = nil
+        resizeFlowSidebarPanel(repositionToEditingScreen: true)
     }
 
     private func handleMeetingDetectionEnded(_ ended: DetectedMeeting) {
@@ -491,7 +495,8 @@ final class AppModel {
         if showMeetingPrompt {
             showMeetingPrompt = false
             meetingPromptMinimized = false
-            updateFlowSidebarPanel()
+            flowSidebarPinnedSize = nil
+            resizeFlowSidebarPanel()
         }
 
         guard autoStopRecordingWhenMeetingEnds,
@@ -511,7 +516,8 @@ final class AppModel {
         showMeetingPrompt = false
         meetingPromptMinimized = false
         flowSidebarExpanded = false
-        updateFlowSidebarPanel()
+        flowSidebarPinnedSize = nil
+        resizeFlowSidebarPanel()
     }
 
     func acceptDetectedMeeting() {
@@ -519,7 +525,8 @@ final class AppModel {
         showMeetingPrompt = false
         meetingPromptMinimized = false
         flowSidebarExpanded = false
-        updateFlowSidebarPanel()
+        flowSidebarPinnedSize = nil
+        resizeFlowSidebarPanel()
         toggleMeeting()
     }
 
@@ -529,22 +536,32 @@ final class AppModel {
 
         if showMeetingPrompt, meetingPromptMinimized {
             meetingPromptMinimized = false
-            updateFlowSidebarPanel(animated: true)
-        } else if showMeetingPrompt {
-            meetingPromptMinimized = true
-            updateFlowSidebarPanel(animated: true)
+            flowSidebarPinnedSize = nil
+            resizeFlowSidebarPanel()
+        } else if showMeetingPrompt || flowSidebarExpanded {
+            collapseFlowSidebar()
         } else {
-            flowSidebarExpanded.toggle()
-            updateFlowSidebarPanel(animated: true)
+            flowSidebarExpanded = true
+            flowSidebarPinnedSize = nil
+            resizeFlowSidebarPanel()
         }
     }
 
     func collapseFlowSidebar() {
+        let clusterShowing = flowSidebarExpanded || (showMeetingPrompt && !meetingPromptMinimized)
         if showMeetingPrompt {
             meetingPromptMinimized = true
         }
         flowSidebarExpanded = false
-        updateFlowSidebarPanel(animated: true)
+        // Fade finishes inside the current window. Shrinking in parallel cuts the
+        // capsules with the panel's rectangular bounds.
+        if clusterShowing, let panel = meetingPromptPanel, panel.isVisible {
+            flowSidebarPinnedSize = panel.frame.size
+            resizeFlowSidebarPanel(afterNanoseconds: Self.flowClusterFadeDelay)
+        } else {
+            flowSidebarPinnedSize = nil
+            resizeFlowSidebarPanel()
+        }
     }
 
     /// Flow-bar Dictate / mic — same as double-tap Fn (hands-free until tap / Esc).
@@ -556,7 +573,7 @@ final class AppModel {
     }
 
     func presentFlowSidebar() {
-        updateFlowSidebarPanel(repositionToEditingScreen: true)
+        resizeFlowSidebarPanel(repositionToEditingScreen: true)
     }
 
     func startHotkeysIfPossible() {
@@ -1112,8 +1129,9 @@ final class AppModel {
         )
 
         // Snapshot latest roster onto the note before refine.
-        if !liveParticipantRoster.isEmpty {
-            note.participantRoster = liveParticipantRoster
+        let roster = MeetingParticipantReader.usableNames(liveParticipantRoster)
+        if !roster.isEmpty {
+            note.participantRoster = roster
         }
 
         // Post-call Sortformer pass (Wispr-style): separate remote voices, then name from context.
@@ -1608,10 +1626,11 @@ final class AppModel {
                     preferredAppName: self.recordingMeetingAppName ?? self.detectedMeeting?.appName,
                     preferredBundleID: self.detectedMeeting?.bundleID
                 )
-                if !roster.names.isEmpty {
-                    self.liveParticipantRoster = roster.names
+                let names = MeetingParticipantReader.usableNames(roster.names)
+                if !names.isEmpty {
+                    self.liveParticipantRoster = names
                     if let id = self.activeMeetingID {
-                        self.meetings.updateParticipantRoster(id: id, names: roster.names)
+                        self.meetings.updateParticipantRoster(id: id, names: names)
                     }
                 }
                 try? await Task.sleep(for: .seconds(8))
@@ -1637,7 +1656,7 @@ final class AppModel {
             contextTerms: speakerTracker.voices.rememberedNames
                 + projects.projects.map(\.name)
                 + projects.projects.flatMap(\.people)
-                + liveParticipantRoster,
+                + MeetingParticipantReader.usableNames(liveParticipantRoster),
             limit: ASRHintBuilder.meetingLimit
         )
     }
@@ -1721,7 +1740,7 @@ final class AppModel {
             attendees: upcomingCalendarMeeting?.attendees ?? [],
             contextTerms: projects.projects.map(\.name)
                 + projects.projects.flatMap(\.people)
-                + liveParticipantRoster,
+                + MeetingParticipantReader.usableNames(liveParticipantRoster),
             limit: ASRHintBuilder.dictationLimit
         )
     }
@@ -1738,23 +1757,6 @@ final class AppModel {
                 parakeetReady = await parakeetASR.isReady
             }
         }
-    }
-
-    func toggleListeningPillCollapsed() {
-        listeningPillCollapsed.toggle()
-        updateListeningPillPanel()
-    }
-
-    func collapseListeningPill() {
-        guard !listeningPillCollapsed else { return }
-        listeningPillCollapsed = true
-        updateListeningPillPanel()
-    }
-
-    func expandListeningPill() {
-        guard listeningPillCollapsed else { return }
-        listeningPillCollapsed = false
-        updateListeningPillPanel()
     }
 
     func confirmListeningPill() {
@@ -1777,22 +1779,6 @@ final class AppModel {
         case .idle, .processing, .meetingProcessing:
             break
         }
-    }
-
-    func listeningPillOrigin() -> CGPoint {
-        listeningPill?.frame.origin ?? .zero
-    }
-
-    func moveListeningPill(to origin: CGPoint) {
-        listeningPill?.setFrameOrigin(origin)
-    }
-
-    func flowSidebarOrigin() -> CGPoint {
-        meetingPromptPanel?.frame.origin ?? .zero
-    }
-
-    func moveFlowSidebar(to origin: CGPoint) {
-        meetingPromptPanel?.setFrameOrigin(origin)
     }
 
     // MARK: - Pill UI
@@ -1836,26 +1822,27 @@ final class AppModel {
         if listeningPill?.isVisible == true {
             updateListeningPillPanel(repositionToEditingScreen: true)
         } else if !isCaptureRailActive {
-            updateFlowSidebarPanel(repositionToEditingScreen: true, animated: false)
+            resizeFlowSidebarPanel(repositionToEditingScreen: true)
         }
     }
 
     private func showListeningPill(_ visible: Bool) {
         if visible {
-            listeningPillCollapsed = false
             // Idle edge rail and active listening rail share the trailing dock —
             // hide the idle one so they never stack on the wrong screen.
+            flowSidebarResizeTask?.cancel()
+            flowSidebarResizeTask = nil
+            flowSidebarPinnedSize = nil
             flowSidebarExpanded = false
             meetingPromptPanel?.orderOut(nil)
             updateListeningPillPanel(repositionToEditingScreen: true)
             listeningPill?.orderFrontRegardless()
         } else {
-            listeningPillCollapsed = false
             listeningPill?.orderOut(nil)
             // Restore the idle rail on the editing screen (still have dictationTargetApp
             // during processing, so preferredOverlayScreen stays correct).
             if !isCaptureRailActive {
-                updateFlowSidebarPanel(repositionToEditingScreen: true, animated: false)
+                resizeFlowSidebarPanel(repositionToEditingScreen: true)
             }
         }
     }
@@ -1886,9 +1873,46 @@ final class AppModel {
                 x: oldFrame.maxX - size.width,
                 y: oldFrame.midY - size.height / 2
             )
-            panel.setFrame(NSRect(origin: newOrigin, size: size), display: true)
+            applyOverlayFrame(panel, NSRect(origin: newOrigin, size: size))
         }
         panel.orderFrontRegardless()
+    }
+
+    /// Matches `MeetingPromptView`'s cluster fade so the window rect never
+    /// sweeps across still-visible capsules.
+    private static let flowClusterFadeDelay: UInt64 = 180_000_000
+
+    private func resizeFlowSidebarPanel(
+        afterNanoseconds delay: UInt64 = 0,
+        repositionToEditingScreen: Bool = false,
+        animated: Bool = false
+    ) {
+        if delay == 0, flowSidebarPinnedSize != nil, flowSidebarResizeTask != nil {
+            // Fade is still running. Keep the held frame and let the scheduled shrink land.
+            updateFlowSidebarPanel(
+                repositionToEditingScreen: repositionToEditingScreen,
+                animated: false
+            )
+            return
+        }
+        flowSidebarResizeTask?.cancel()
+        flowSidebarResizeTask = nil
+        if delay == 0 {
+            updateFlowSidebarPanel(
+                repositionToEditingScreen: repositionToEditingScreen,
+                animated: animated
+            )
+            return
+        }
+        flowSidebarResizeTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled else { return }
+            flowSidebarPinnedSize = nil
+            updateFlowSidebarPanel(
+                repositionToEditingScreen: repositionToEditingScreen,
+                animated: animated
+            )
+        }
     }
 
     private func updateFlowSidebarPanel(
@@ -1897,6 +1921,9 @@ final class AppModel {
     ) {
         // Never show the idle rail over the active listening UI.
         if isCaptureRailActive || listeningPill?.isVisible == true {
+            flowSidebarResizeTask?.cancel()
+            flowSidebarResizeTask = nil
+            flowSidebarPinnedSize = nil
             flowSidebarExpanded = false
             meetingPromptPanel?.orderOut(nil)
             return
@@ -1905,13 +1932,17 @@ final class AppModel {
         let expanded = (showMeetingPrompt && !meetingPromptMinimized) || flowSidebarExpanded
         // Panel size must match content — excess width left-aligns the handle and
         // makes it look like it's floating away from the screen edge.
+        // A pinned size holds the pre-collapse frame while capsules fade.
         let size: CGSize
-        if expanded {
+        if let pinned = flowSidebarPinnedSize {
+            size = pinned
+        } else if expanded {
             size = showMeetingPrompt
                 ? CGSize(width: 304, height: 220)
                 : CGSize(width: 168, height: 112)
         } else {
-            // 8pt handle + leading pad 6 + trailing flush pad 1.
+            // Trailing slice of the rail: 8pt handle, flush to the screen edge.
+            // The faded cluster sits outside this rect, so it isn't cropped into a box.
             size = CGSize(width: 15, height: 48)
         }
 
@@ -1972,21 +2003,23 @@ final class AppModel {
     ) {
         switch edge {
         case .trailing:
-            panel.setFrame(trailingFrame(size: size, on: screen, inset: inset), display: true)
+            applyOverlayFrame(panel, trailingFrame(size: size, on: screen, inset: inset))
         }
     }
 
-    /// Smoothly grow/shrink the floating rail so expand/collapse isn't a hard jump.
+    /// Applies a frame AppModel chose. SwiftUI's follow-up `setFrame` is ignored
+    /// so the rail can't walk. An animator proxy uses that same path and would be
+    /// dropped, so the destination frame is applied directly.
     private func setPanelFrame(_ panel: NSPanel, to frame: NSRect, animated: Bool) {
-        guard animated, panel.isVisible else {
+        _ = animated
+        applyOverlayFrame(panel, frame)
+    }
+
+    private func applyOverlayFrame(_ panel: NSPanel, _ frame: NSRect) {
+        if let overlay = panel as? OverlayPanel {
+            overlay.setFrameAllowingSizeChange(frame, display: true)
+        } else {
             panel.setFrame(frame, display: true)
-            return
-        }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.28
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            context.allowsImplicitAnimation = true
-            panel.animator().setFrame(frame, display: true)
         }
     }
 
@@ -2041,7 +2074,7 @@ final class AppModel {
     /// Borderless transparent panel — window shadow stays off so we don't get a
     /// rectangular halo; the SwiftUI views draw their own shape-matched shadow.
     private func makeFloatingPanel(size: CGSize, level: NSWindow.Level) -> NSPanel {
-        let panel = NSPanel(
+        let panel = OverlayPanel(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
@@ -2052,10 +2085,12 @@ final class AppModel {
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.isOpaque = false
-        // SwiftUI hosting views eat background drags — views use WindowDragHandle /
-        // draggablePanel instead. Keeping this false avoids a false sense of support.
+        // SwiftUI DragGesture on these panels crashes during AppKit hit testing.
+        // Views drag through WindowDragHandle instead.
         panel.isMovableByWindowBackground = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.isRestorable = false
+        panel.lockFrameSize()
         return panel
     }
 }

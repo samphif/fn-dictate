@@ -37,12 +37,8 @@ struct MeetingPromptView: View {
         }
         // Keep chrome glued to the screen edge if the panel is slightly oversized.
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-        .animation(railAnimation, value: isExpanded)
         .animation(railAnimation, value: showMeetingSheet)
-        .draggablePanel(
-            onDragStart: { model.flowSidebarOrigin() },
-            onDragTo: { model.moveFlowSidebar(to: $0) }
-        )
+        .appKitHover(handleHover)
         .preferredColorScheme(.dark)
         .onDisappear {
             hoverCollapseTask?.cancel()
@@ -84,16 +80,15 @@ struct MeetingPromptView: View {
         }
     }
 
-    // MARK: - Idle rail (morphing collapse ↔ expand)
+    // MARK: - Idle rail (fade ↔ edge handle)
 
-    /// One continuous layout: cluster width/opacity morphs; handle stays docked.
+    /// Capsules fade in place. A width clip or a shrinking panel rect cuts them
+    /// into a box, so layout stays put and the panel resizes only after the fade.
     private var idleRailBody: some View {
-        HStack(alignment: .center, spacing: isExpanded ? 8 : 0) {
+        HStack(alignment: .center, spacing: 8) {
             flowClusterControls
                 .opacity(isExpanded ? 1 : 0)
-                .scaleEffect(isExpanded ? 1 : 0.92, anchor: .trailing)
-                .frame(width: isExpanded ? nil : 0, alignment: .trailing)
-                .clipped()
+                .animation(.easeOut(duration: 0.16), value: isExpanded)
                 .allowsHitTesting(isExpanded)
 
             edgeHandle(
@@ -109,14 +104,14 @@ struct MeetingPromptView: View {
                     : "Fn Dictate — hover or click to expand"
             )
         }
-        // Shadow room inward only; trailing stays flush. No group shadow (avoids square halo).
-        .padding(.leading, isExpanded ? 12 : 6)
-        .padding(.vertical, isExpanded ? 12 : 6)
+        // Padding stays constant so the edge handle doesn't jump when the cluster fades.
+        // Trailing stays flush. No group shadow (avoids a square halo).
+        .padding(.leading, 12)
+        .padding(.vertical, 12)
         .padding(.trailing, 1)
-        // Capture hits across spacing without an opaque rectangular fill that shadows.
-        .contentShape(Rectangle())
+        // Invisible fill so clicks in the gaps don't fall through the panel.
+        // No SwiftUI contentShape or onHover — those responders crash during tracking.
         .background(Color.black.opacity(0.001))
-        .onHover(perform: handleHover)
     }
 
     private var flowClusterControls: some View {
@@ -187,10 +182,7 @@ struct MeetingPromptView: View {
 
     private func edgeHandle(onClick: @escaping () -> Void, help: String) -> some View {
         ZStack {
-            WindowDragHandle(
-                onClick: onClick,
-                onHover: handleHover
-            )
+            WindowDragHandle(onClick: onClick)
             Color.clear.allowsHitTesting(false)
         }
         .frame(width: 8, height: 36)
@@ -228,7 +220,6 @@ struct MeetingPromptView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Collapse")
@@ -252,7 +243,6 @@ struct MeetingPromptView: View {
                 .strokeBorder(.white.opacity(0.14), lineWidth: 0.5)
         )
         .padding(12)
-        .onHover(perform: handleHover)
     }
 
     private var meetingPromptContent: some View {
@@ -306,6 +296,51 @@ struct MeetingPromptView: View {
     }
 }
 
+/// Borderless overlay whose frame AppModel owns.
+///
+/// Laying out the rail calls `setFrame` with the SwiftUI ideal size and pins the
+/// top-left corner. The collapsed handle is smaller than that ideal size, so every
+/// close grows the panel down and to the right, and the next open anchors to the
+/// drifted rect. Size changes are ignored unless AppModel requested that exact frame.
+/// Drags only move the origin, so they still go through.
+final class OverlayPanel: NSPanel {
+    private var locksFrameSize = false
+    private var allowedSizeChange: NSRect?
+
+    func lockFrameSize() {
+        locksFrameSize = true
+    }
+
+    func setFrameAllowingSizeChange(_ frameRect: NSRect, display: Bool) {
+        allowedSizeChange = frameRect
+        setFrame(frameRect, display: display)
+        allowedSizeChange = nil
+    }
+
+    override func setFrame(_ frameRect: NSRect, display displayFlag: Bool) {
+        if shouldIgnoreSizeChange(to: frameRect) { return }
+        super.setFrame(frameRect, display: displayFlag)
+    }
+
+    override func setFrame(_ frameRect: NSRect, display displayFlag: Bool, animate animateFlag: Bool) {
+        if shouldIgnoreSizeChange(to: frameRect) { return }
+        super.setFrame(frameRect, display: displayFlag, animate: animateFlag)
+    }
+
+    private func shouldIgnoreSizeChange(to frameRect: NSRect) -> Bool {
+        guard locksFrameSize else { return false }
+        let current = frame.size
+        let sizeChanged = abs(current.width - frameRect.width) > 0.5
+            || abs(current.height - frameRect.height) > 0.5
+        guard sizeChanged else { return false }
+        guard let allowedSizeChange else { return true }
+        return abs(allowedSizeChange.origin.x - frameRect.origin.x) > 0.5
+            || abs(allowedSizeChange.origin.y - frameRect.origin.y) > 0.5
+            || abs(allowedSizeChange.width - frameRect.width) > 0.5
+            || abs(allowedSizeChange.height - frameRect.height) > 0.5
+    }
+}
+
 /// Hosting controller that keeps its layer fully clear so rounded SwiftUI chrome
 /// isn't boxed by the default opaque (often black) AppKit view background.
 ///
@@ -315,6 +350,7 @@ final class ClearHostingController<Content: View>: NSHostingController<Content> 
     override func viewDidLoad() {
         super.viewDidLoad()
         clearBackground()
+        HostingEventShield.install()
     }
 
     override func viewWillAppear() {

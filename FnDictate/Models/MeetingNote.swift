@@ -285,11 +285,6 @@ struct MeetingNote: Identifiable, Codable, Equatable, Sendable {
             lines.append("")
         }
 
-        if !participantRoster.isEmpty {
-            lines.append("**Participants (UI):** \(participantRoster.joined(separator: ", "))")
-            lines.append("")
-        }
-
         if let brief, !brief.isEmpty {
             lines.append("## Pre-meeting brief")
             lines.append(brief)

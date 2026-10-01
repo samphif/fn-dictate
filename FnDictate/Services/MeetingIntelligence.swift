@@ -373,7 +373,7 @@ struct MeetingIntelligence: Sendable {
     }
 
     private func knownPeopleList(attendees: [String], rosterNames: [String]) -> String {
-        let merged = (attendees + rosterNames).uniqued()
+        let merged = (attendees + MeetingParticipantReader.usableNames(rosterNames)).uniqued()
         return merged.isEmpty ? "unknown" : merged.joined(separator: ", ")
     }
 
@@ -531,7 +531,7 @@ struct MeetingIntelligence: Sendable {
         rosterNames: [String]
     ) async -> [MeetingTranscriptSegment] {
         guard !segments.isEmpty else { return [] }
-        let known = (attendees + rosterNames).uniqued()
+        let known = (attendees + MeetingParticipantReader.usableNames(rosterNames)).uniqued()
         let speakers = Set(segments.map(\.speaker))
         let onlyYou = speakers.count == 1 && speakers.contains("You")
         let hasOthers = speakers.contains("Others")

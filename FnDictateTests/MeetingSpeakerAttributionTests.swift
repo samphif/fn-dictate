@@ -61,6 +61,60 @@ struct MeetingSpeakerAttributionTests {
         #expect(sharedMic(sharedMicSegments, turns: twoSpeakerTurns, hints: hints) == ["You", "Jodi", "You", "Jodi"])
     }
 
+    @Test func systemChromeRosterIsNotUsedAsSpeakerNames() {
+        let hints = MeetingSpeakerAttribution.Hints(
+            rosterNames: [
+                "Calendar | Microsoft Teams",
+                "Apple",
+                "About This Mac",
+                "System Information",
+                "System Settings..., 1 update",
+                "App Store",
+                "Recent Items",
+                "Applications",
+                "1Password.app",
+                "Show \"1Password.app\" in Finder",
+                "FnDictate.app",
+                "Show \"FnDictate.app\" in Finder",
+                "Virginia"
+            ]
+        )
+        #expect(sharedMic(sharedMicSegments, turns: twoSpeakerTurns, hints: hints) == ["You", "Virginia", "You", "Virginia"])
+    }
+
+    @Test func usableNamesDropMenuBarAndFinderChrome() {
+        let raw = [
+            "Calendar | Microsoft Teams",
+            "Apple",
+            "About This Mac",
+            "System Information",
+            "System Settings..., 1 update",
+            "1 update",
+            "App Store",
+            "Recent Items",
+            "Applications",
+            "1Password.app",
+            "Show \"1Password.app\" in Finder",
+            "FnDictate.app",
+            "Show \"FnDictate.app\" in Finder",
+            "Loom.app",
+            "Show \"Loom.app\" in Finder",
+            "Messages.app",
+            "Microsoft Edge.app",
+            "Podcasts.app",
+            "Preview.app",
+            "Safari.app",
+            "System Settings.app",
+            "Documents",
+            "Desktop",
+            "Jodi",
+            "Alex Kim",
+            "Dr. Smith",
+            "Sam (Muted)"
+        ]
+        #expect(MeetingParticipantReader.usableNames(raw) == ["Jodi", "Alex Kim", "Dr. Smith", "Sam"])
+    }
+
     @Test func attendeesNameSlotsInOrderOfFirstAppearance() {
         let segments = [
             Fixtures.segment("You", at: 0),

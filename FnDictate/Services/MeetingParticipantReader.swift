@@ -4,6 +4,10 @@ import Foundation
 
 /// Best-effort Accessibility roster of meeting participants (Wispr/Granola-style).
 /// Reads display names from Zoom / Meet / Teams UI — does not bind active speaker turns.
+///
+/// Only meeting windows are walked. The app element also exposes the menu bar,
+/// and that menu was being stored as a roster: About This Mac, Recent Items,
+/// “Show in Finder”, and Documents.
 enum MeetingParticipantReader {
     struct Roster: Equatable, Sendable {
         var names: [String]
@@ -108,22 +112,36 @@ enum MeetingParticipantReader {
         }
 
         var budget = 400
-        walk(appElement, depth: 0, maxDepth: 10, budget: &budget) { element in
-            if let title = stringAttribute(element, kAXTitleAttribute as String) {
-                consider(title)
-            }
-            if let desc = stringAttribute(element, kAXDescriptionAttribute as String) {
-                consider(desc)
-            }
-            if let value = stringAttribute(element, kAXValueAttribute as String), value.count < 80 {
-                // Some Electron UIs put the display name in AXValue on tiles.
-                if looksLikePersonLabel(value) {
-                    consider(value)
+        // Windows only. The application element also exposes the menu bar.
+        for root in windowElements(appElement).prefix(6) {
+            walk(root, depth: 0, maxDepth: 10, budget: &budget) { element in
+                // Window and toolbar titles repeat the call chrome ("Calendar | Microsoft Teams").
+                guard includesOwnLabel(element) else { return }
+                if let title = stringAttribute(element, kAXTitleAttribute as String) {
+                    consider(title)
+                }
+                if let desc = stringAttribute(element, kAXDescriptionAttribute as String) {
+                    consider(desc)
+                }
+                if let value = stringAttribute(element, kAXValueAttribute as String), value.count < 80 {
+                    // Some Electron UIs put the display name in AXValue on tiles.
+                    if looksLikePersonLabel(value) {
+                        consider(value)
+                    }
                 }
             }
+            if budget <= 0 { break }
         }
 
         return Array(collected.prefix(24))
+    }
+
+    private static func windowElements(_ appElement: AXUIElement) -> [AXUIElement] {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &ref) == .success,
+              let windows = ref as? [AXUIElement]
+        else { return [] }
+        return windows
     }
 
     private static func walk(
@@ -134,6 +152,8 @@ enum MeetingParticipantReader {
         visit: (AXUIElement) -> Void
     ) {
         guard budget > 0, depth <= maxDepth else { return }
+        // Apple menu, Recent Items, and app menus are not participants.
+        if isMenuChrome(element) { return }
         budget -= 1
         visit(element)
 
@@ -157,6 +177,20 @@ enum MeetingParticipantReader {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// Roster entries safe to show as speaker suggestions or feed to naming.
+    /// Drops menu-bar and window-chrome strings already saved on older notes.
+    static func usableNames(_ names: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for name in names {
+            let cleaned = cleanName(name)
+            guard isPlausibleParticipantName(cleaned) else { continue }
+            guard seen.insert(cleaned.lowercased()).inserted else { continue }
+            out.append(cleaned)
+        }
+        return out
+    }
+
     private static func cleanName(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         // Strip common tile suffixes: "Alex (Muted)", "Alex — presenting"
@@ -166,7 +200,43 @@ enum MeetingParticipantReader {
                 s = head
             }
         }
+        // "Jodi | Guest" → Jodi. "Calendar | Microsoft Teams" stays intact and is rejected.
+        if let pipe = s.firstIndex(of: "|") {
+            let head = String(s[..<pipe]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if isPlausibleParticipantName(head) {
+                s = head
+            }
+        }
         return s
+    }
+
+    private static func role(of element: AXUIElement) -> String? {
+        stringAttribute(element, kAXRoleAttribute as String)
+    }
+
+    private static func isMenuChrome(_ element: AXUIElement) -> Bool {
+        guard let role = role(of: element) else { return false }
+        let chrome: Set<String> = [
+            kAXMenuBarRole as String,
+            kAXMenuBarItemRole as String,
+            kAXMenuRole as String,
+            kAXMenuItemRole as String
+        ]
+        return chrome.contains(role)
+    }
+
+    /// Structural containers whose own title is chrome, not a person. Children are still walked.
+    private static func includesOwnLabel(_ element: AXUIElement) -> Bool {
+        guard let role = role(of: element) else { return true }
+        let structural: Set<String> = [
+            kAXApplicationRole as String,
+            kAXWindowRole as String,
+            kAXSheetRole as String,
+            kAXDrawerRole as String,
+            kAXToolbarRole as String,
+            kAXScrollAreaRole as String
+        ]
+        return !structural.contains(role)
     }
 
     private static func looksLikePersonLabel(_ value: String) -> Bool {
@@ -195,16 +265,29 @@ enum MeetingParticipantReader {
             "new tab", "tabs", "favorites", "history", "downloads", "extensions",
             "bookmarks", "reading list", "collections", "profile", "profiles",
             "window", "windows", "toolbar", "sidebar", "omnibox", "address bar",
-            "reload", "home", "menu", "file", "edit", "view", "help",
+            "reload", "home", "menu", "file", "view", "help",
             "share screen", "present now", "turn on captions", "turn off captions",
-            "leave call", "end call", "admit", "deny", "waiting room"
+            "leave call", "end call", "admit", "deny", "waiting room",
+            // Apple menu, Recent Items, and the Teams window title.
+            "apple", "about this mac", "system information", "system settings",
+            "app store", "recent items", "applications", "calendar",
+            "force quit", "lock screen", "log out", "sleep", "restart", "shut down",
+            "documents", "desktop", "recents", "airdrop",
+            "icloud drive", "macintosh hd", "servers", "clear menu",
+            "pictures", "movies", "music", "locations"
         ]
         if blocked.contains(lower) { return false }
         if lower.hasPrefix("http") { return false }
+        // Menu items and Spotlight/Finder rows: "1Password.app", "Show \"FnDictate.app\" in Finder".
+        if lower.contains(".app") || lower.contains("in finder") || lower.contains("\"") || lower.contains("“") {
+            return false
+        }
+        if trimmed.contains("|") || trimmed.contains("…") || trimmed.contains("...") { return false }
+        if lower.range(of: #"\d+\s+updates?"#, options: .regularExpression) != nil { return false }
         // Phrases that often appear as AX titles for chrome, not people.
         let blockedSubstrings = [
             "search bar", "address bar", "site information", "app bar",
-            "new tab", "tab group", "view site"
+            "new tab", "tab group", "view site", "this mac", "system settings"
         ]
         if blockedSubstrings.contains(where: { lower.contains($0) }) { return false }
         if trimmed.allSatisfy({ $0.isNumber || $0.isPunctuation || $0.isWhitespace }) {

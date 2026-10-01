@@ -1435,7 +1435,7 @@ struct LibraryView: View {
         .padding(.vertical, 14)
         .background(selected ? FlowTheme.cream.opacity(0.7) : Color.clear)
         .contentShape(Rectangle())
-        .onHover { hovering in
+        .appKitHover { hovering in
             hoveredDictionaryID = hovering ? entry.id : (hoveredDictionaryID == entry.id ? nil : hoveredDictionaryID)
         }
         .onTapGesture {
@@ -1724,7 +1724,7 @@ struct LibraryView: View {
                     .frame(width: 1, height: 48)
             }
             .help("Drag to resize preview")
-            .onHover { hovering in
+            .appKitHover { hovering in
                 DispatchQueue.main.async {
                     if hovering {
                         NSCursor.resizeLeftRight.set()
@@ -1932,13 +1932,6 @@ struct LibraryView: View {
                     }
                     Spacer(minLength: 0)
                 }
-
-                if !model.liveParticipantRoster.isEmpty {
-                    Text("Roster: \(model.liveParticipantRoster.prefix(8).joined(separator: ", "))")
-                        .font(.system(size: 11))
-                        .foregroundStyle(FlowTheme.muted)
-                        .lineLimit(2)
-                }
             }
 
             ScrollView {
@@ -2124,7 +2117,7 @@ struct LibraryView: View {
                 .fill(selected ? FlowTheme.cream : (hoveredMeetingID == note.id ? FlowTheme.card : Color.clear))
         )
         .contentShape(Rectangle())
-        .onHover { hovering in
+        .appKitHover { hovering in
             hoveredMeetingID = hovering ? note.id : (hoveredMeetingID == note.id ? nil : hoveredMeetingID)
         }
         .gesture(
@@ -2479,7 +2472,7 @@ private struct DictationRowView: View {
                     .fill(selected ? FlowTheme.cream : Color.clear)
             )
             .contentShape(Rectangle())
-            .onHover { isHovered = $0 }
+            .appKitHover { isHovered = $0 }
             .onTapGesture(perform: onSelect)
             .contextMenu {
                 Button("Copy", action: onCopy)
@@ -3283,11 +3276,6 @@ struct MeetingDetailView: View {
                             Text(note.attendees.joined(separator: ", "))
                                 .foregroundStyle(FlowTheme.muted)
                         }
-                        if !note.participantRoster.isEmpty {
-                            Text("Roster: \(note.participantRoster.joined(separator: ", "))")
-                                .font(.system(size: 12))
-                                .foregroundStyle(FlowTheme.muted)
-                        }
                     }
 
                     MeetingProcessingBanner(
@@ -3412,7 +3400,7 @@ struct MeetingDetailView: View {
     }
 
     private func renameSuggestions(for note: MeetingNote) -> [String] {
-        (note.attendees + note.participantRoster + [note.remoteOneOnOneName].compactMap { $0 })
+        (note.attendees + MeetingParticipantReader.usableNames(note.participantRoster) + [note.remoteOneOnOneName].compactMap { $0 })
             .uniqued()
     }
 

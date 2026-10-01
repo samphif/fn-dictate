@@ -12,6 +12,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let isHostingTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before any panel or window exists. Pressure-event hit testing and SwiftUI
+        // hover delivery trap in MainActor.assumeIsolated on this OS.
+        HostingEventShield.install()
         guard !isHostingTests else { return }
         // Regular policy → Dock + Cmd+Tab. Menu bar extra still works.
         NSApp.setActivationPolicy(.regular)

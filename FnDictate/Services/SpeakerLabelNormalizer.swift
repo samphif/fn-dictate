@@ -60,7 +60,7 @@ enum SpeakerLabelNormalizer {
             list.append(remote)
         }
         list.append(contentsOf: hints.calendarAttendees)
-        list.append(contentsOf: hints.rosterNames)
+        list.append(contentsOf: MeetingParticipantReader.usableNames(hints.rosterNames))
         // Prefer first occurrence as canonical; uniqued case-insensitively.
         var seen = Set<String>()
         var out: [String] = []

@@ -179,7 +179,7 @@ enum MeetingSpeakerAttribution {
     private static func nameCandidates(hints: Hints) -> [String] {
         var list: [String] = []
         var seen = Set<String>()
-        for name in hints.calendarAttendees + hints.rosterNames {
+        for name in hints.calendarAttendees + MeetingParticipantReader.usableNames(hints.rosterNames) {
             let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
             let key = trimmed.lowercased()
